@@ -1,0 +1,28 @@
+﻿[package]
+name = "abs_art"
+version = "0.1.0"
+edition = "2021"
+
+authors = ["lino <lino_snsalias@outlook.com>"]
+description = "ABStraction of Asynchronous RunTime"
+homepage = "https://github.com/ljsnogard/abs_art"
+keywords = ["async", "tokio", "async_std", "smol", "wrapper"]
+categories = []
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[features]
+default = ["runtime-tokio"]
+runtime-async-std = ["async-std"]
+runtime-tokio = ["tokio"]
+runtime-smol = ["smol", "scoped-tls", "async-executor"]
+
+[dependencies]
+pin-project = { version = "1.1.*" }
+pin-utils = { version = "0.1.0" }
+async-std = { version = "1.12.*", features = ["attributes", "unstable"], optional = true }
+smol = { version = "2", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+scoped-tls = { version = "1", optional = true }
+async-executor = { version = "1.5.*", optional = true }
