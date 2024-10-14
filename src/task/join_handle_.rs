@@ -1,5 +1,5 @@
 ﻿use core::{
-    fmt,
+    error, fmt,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -60,6 +60,8 @@ impl fmt::Display for JoinError {
         self.0.fmt(f)
     }
 }
+
+impl error::Error for JoinError {}
 
 #[cfg(feature = "runtime-async-std")]
 mod join_impl_ {
