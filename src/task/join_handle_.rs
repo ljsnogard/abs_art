@@ -4,25 +4,21 @@
     pin::Pin,
     task::{Context, Poll},
 };
+
 use pin_project::pin_project;
-use pin_utils::pin_mut;
 
 #[pin_project]
 pub struct JoinHandle<T>(#[pin]join_impl_::JoinHandleImpl<T>);
-
-impl<T> JoinHandle<T> {
-    async fn join_async_(self: Pin<&mut Self>) -> Result<T, JoinError> {
-        self.project().0.await.map_err(JoinError)
-    }
-}
 
 impl<T> Future for JoinHandle<T> {
     type Output = Result<T, JoinError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let f = self.join_async_();
-        pin_mut!(f);
-        f.poll(cx)
+        if let Poll::Ready(r) = self.project().0.poll(cx) {
+            Poll::Ready(r.map_err(JoinError))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -73,7 +69,6 @@ mod join_impl_ {
         task::{Context, Poll},
     };
     use pin_project::pin_project;
-    use pin_utils::pin_mut;
 
     #[pin_project]
     pub(super) struct JoinHandleImpl<T> {
@@ -84,11 +79,6 @@ mod join_impl_ {
         pub fn from_handle(handle: async_std::task::JoinHandle<T>) -> Self {
             JoinHandleImpl { handle_: handle }
         }
-
-        async fn join_async_(self: Pin<&mut Self>) -> Result<T, JoinErrorImpl> {
-            let t = self.project().handle_.await;
-            Result::Ok(t)
-        }
     }
 
     impl<T> Future for JoinHandleImpl<T> {
@@ -98,9 +88,11 @@ mod join_impl_ {
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Self::Output> {
-            let f = self.join_async_();
-            pin_mut!(f);
-            f.poll(cx)
+            if let Poll::Ready(t) = self.project().handle_.poll(cx) {
+                Poll::Ready(Result::Ok(t))
+            } else {
+                Poll::Pending
+            }
         }
     }
 
@@ -129,7 +121,6 @@ mod join_impl_ {
         task::{Context, Poll},
     };
     use pin_project::pin_project;
-    use pin_utils::pin_mut;
 
     #[pin_project]
     pub(super) struct JoinHandleImpl<T> {
@@ -140,11 +131,6 @@ mod join_impl_ {
         pub fn from_handle(handle: smol::Task<T>) -> JoinHandleImpl<T> {
             JoinHandleImpl { handle_: handle }
         }
-
-        async fn join_async_(self: Pin<&mut Self>) -> Result<T, JoinErrorImpl> {
-            let t = self.project().handle_.await;
-            Result::Ok(t)
-        }
     }
 
     impl<T> Future for JoinHandleImpl<T> {
@@ -154,9 +140,11 @@ mod join_impl_ {
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Self::Output> {
-            let f = self.join_async_();
-            pin_mut!(f);
-            f.poll(cx)
+            if let Poll::Ready(t) = self.project().handle_.poll(cx) {
+                Poll::Ready(Result::Ok(t))
+            } else {
+                Poll::Pending
+            }
         }
     }
 
@@ -184,7 +172,6 @@ mod join_impl_ {
         task::{Context, Poll},
     };
     use pin_project::pin_project;
-    use pin_utils::pin_mut;
 
     #[pin_project]
     pub(super) struct JoinHandleImpl<T> {
@@ -195,13 +182,6 @@ mod join_impl_ {
         pub fn from_handle(handle: tokio::task::JoinHandle<T>) -> JoinHandleImpl<T> {
             JoinHandleImpl { handle_: handle }
         }
-
-        async fn join_async_(self: Pin<&mut Self>) -> Result<T, JoinErrorImpl> {
-            self.project()
-                .handle_
-                .await
-                .map_err(JoinErrorImpl)
-        }
     }
 
     impl<T> Future for JoinHandleImpl<T> {
@@ -211,9 +191,11 @@ mod join_impl_ {
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
         ) -> Poll<Self::Output> {
-            let f = self.join_async_();
-            pin_mut!(f);
-            f.poll(cx)
+            if let Poll::Ready(r) = self.project().handle_.poll(cx) {
+                Poll::Ready(r.map_err(JoinErrorImpl))
+            } else {
+                Poll::Pending
+            }
         }
     }
 

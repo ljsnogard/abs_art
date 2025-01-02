@@ -43,3 +43,14 @@ impl Runtime {
     ),
 ))]
 compile_error!("ONE and ONLY ONE runtime feature can be enabled at the same time");
+
+pub mod x_deps {
+    #[cfg(feature = "runtime-async-std")]
+    pub use async_std;
+
+    #[cfg(feature = "runtime-smol")]
+    pub use smol;
+
+    #[cfg(feature = "runtime-tokio")]
+    pub use tokio;
+}
