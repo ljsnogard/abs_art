@@ -25,37 +25,6 @@ where
     spawn_impl_::spawn_blocking(future)
 }
 
-#[cfg(feature = "runtime-async-std")]
-mod spawn_impl_ {
-    use core::future::Future;
-    use async_std::task;
-    use crate::task::JoinHandle;
-
-    pub fn spawn<F, T>(future: F) -> JoinHandle<T>
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        JoinHandle::from(task::spawn(future))
-    }
-
-    pub fn spawn_local<F, T>(future: F) -> JoinHandle<T>
-    where
-        F: Future<Output = T> + 'static,
-        T: 'static,
-    {
-        JoinHandle::from(task::spawn_local(future))
-    }
-
-    pub fn spawn_blocking<F, T>(future: F) -> JoinHandle<T>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        JoinHandle::from(task::spawn_blocking(future))
-    }
-}
-
 #[cfg(feature = "runtime-smol")]
 mod spawn_impl_ {
     use core::future::Future;
@@ -130,7 +99,6 @@ mod spawn_impl_ {
 }
 
 #[cfg(not(any(
-    feature = "runtime-async-std",
     feature = "runtime-tokio",
     feature = "runtime-smol"
 )))]

@@ -42,11 +42,6 @@ async fn exec_delayed_<X>(
     execute()
 }
 
-#[cfg(feature = "runtime-async-std")]
-mod sleep_impl_ {
-    pub(super) use async_std::task::sleep;
-}
-
 #[cfg(feature = "runtime-smol")]
 mod sleep_impl_ {
     use core::time::Duration;
@@ -63,7 +58,6 @@ mod sleep_impl_ {
 }
 
 #[cfg(not(any(
-    feature = "runtime-async-std",
     feature = "runtime-tokio",
     feature = "runtime-smol"
 )))]

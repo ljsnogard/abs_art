@@ -22,13 +22,6 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-#[cfg(feature = "runtime-async-std")]
-impl<T> From<async_std::task::JoinHandle<T>> for JoinHandle<T> {
-    fn from(handle: async_std::task::JoinHandle<T>) -> Self {
-        JoinHandle(join_impl_::JoinHandleImpl::from_handle(handle))
-    }
-}
-
 #[cfg(feature = "runtime-smol")]
 impl<T> From<smol::Task<T>> for JoinHandle<T> {
     fn from(handle: smol::Task<T>) -> Self {
@@ -58,58 +51,6 @@ impl fmt::Display for JoinError {
 }
 
 impl error::Error for JoinError {}
-
-#[cfg(feature = "runtime-async-std")]
-mod join_impl_ {
-    use core::{
-        convert::Infallible,
-        fmt,
-        future::Future,
-        pin::Pin,
-        task::{Context, Poll},
-    };
-    use pin_project::pin_project;
-
-    #[pin_project]
-    pub(super) struct JoinHandleImpl<T> {
-        #[pin]handle_: async_std::task::JoinHandle<T>,
-    }
-
-    impl<T> JoinHandleImpl<T> {
-        pub fn from_handle(handle: async_std::task::JoinHandle<T>) -> Self {
-            JoinHandleImpl { handle_: handle }
-        }
-    }
-
-    impl<T> Future for JoinHandleImpl<T> {
-        type Output = Result<T, JoinErrorImpl>;
-
-        fn poll(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<Self::Output> {
-            if let Poll::Ready(t) = self.project().handle_.poll(cx) {
-                Poll::Ready(Result::Ok(t))
-            } else {
-                Poll::Pending
-            }
-        }
-    }
-
-    pub(super) struct JoinErrorImpl(Infallible);
-
-    impl fmt::Debug for JoinErrorImpl {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.0.fmt(f)
-        }
-    }
-
-    impl fmt::Display for JoinErrorImpl {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.0.fmt(f)
-        }
-    }
-}
 
 #[cfg(feature = "runtime-smol")]
 mod join_impl_ {
@@ -215,7 +156,6 @@ mod join_impl_ {
 }
 
 #[cfg(not(any(
-    feature = "runtime-async-std",
     feature = "runtime-tokio",
     feature = "runtime-smol",
 )))]
