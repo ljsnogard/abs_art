@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-abs_art.workspace = true
-smol.workspace = true
+abs_art = { path = "../abs_art", version = "0.2.0" }
+smol = { workspace = true }
 
 [features]
 default = ["block_on", "delay", "spawn_send", "spawn_local", "spawn_blocking"]
