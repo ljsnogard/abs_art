@@ -30,3 +30,16 @@ pub(crate) mod spec_tokio_;
 #[allow(unused_imports)]
 #[cfg(feature = "runtime-tokio")]
 pub(crate) use spec_tokio_ as runtime_spec_;
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// unit tests (one file per underlying runtime)
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+#[cfg(all(test, feature = "runtime-compio"))]
+mod tests_compio_;
+
+#[cfg(all(test, feature = "runtime-smol"))]
+mod tests_smol_;
+
+#[cfg(all(test, feature = "runtime-tokio"))]
+mod tests_tokio_;

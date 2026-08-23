@@ -1,3 +1,4 @@
+#[cfg(feature = "join_handle")]
 use crate::join_handle::JoinHandle;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -30,6 +31,7 @@ impl Default for Runtime {
     }
 }
 
+/// The runtime can spawn a task into a global work stealing queue.
 #[cfg(feature = "spawn_send")]
 pub trait TrSpawnSend<F>
 where
@@ -39,6 +41,7 @@ where
     fn spawn(future: F) -> JoinHandle<F::Output>;
 }
 
+/// The runtime can spawn a task for thread-local only work queue.
 #[cfg(feature = "spawn_local")]
 pub trait TrSpawnLocal<F>
 where
@@ -57,9 +60,9 @@ where
     fn spawn_blocking(f: F) -> JoinHandle<T>;
 }
 
-/// Tell the async runtime, this thread should wait on async task
-/// running, then wait the result without affecting the schedule of
-/// async runtime.
+/// Tell the async runtime, this thread should wait on async task running, then
+/// await the result without affecting the schedule of async runtime.
+#[cfg(feature = "block_on")]
 pub trait TrBlockOn<F>
 where
     F: Future + 'static,
