@@ -23,6 +23,8 @@ pub enum Runtime {
 
 pub trait TrAsyncRuntime {
     type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
+
+    fn about() -> Runtime;
 }
 
 pub trait TrJoinHandle<T>

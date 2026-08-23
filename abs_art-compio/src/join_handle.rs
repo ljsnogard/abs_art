@@ -19,6 +19,10 @@ pub struct JoinHandle<T> {
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
+
+    fn about() -> abs_art::Runtime {
+        abs_art::Runtime::Compio
+    }
 }
 
 impl<T> TrJoinHandle<T> for JoinHandle<T>

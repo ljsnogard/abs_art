@@ -16,8 +16,8 @@ authors = ["lino <lino_snsalias@outlook.com>"]
 license = "MIT/Apache-2.0"
 description = "ABStraction of Asynchronous RunTime"
 homepage = "https://github.com/ljsnogard/abs_art"
-keywords = ["async", "futures", "tokio", "smol", "compio", "wrapper"]
-categories = ["no_std"]
+keywords = ["async", "async-runtime", "wrapper"]
+categories = ["asynchronous"]
 readme = "README.md"
 
 [workspace.dependencies]
