@@ -16,7 +16,7 @@ join_handle = []
 block_on = []
 spawn_send = ["join_handle"]
 spawn_local = ["join_handle"]
-spawn_blocking = ["join_handle"]
+spawn_blocking = ["join_handle", "tokio/rt", "tokio/rt-multi-thread"]
 
 runtime-tokio = ["dep:tokio"]
 runtime-smol = ["dep:smol", "scoped-tls", "async-executor"]

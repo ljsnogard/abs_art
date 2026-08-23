@@ -1,16 +1,5 @@
 use crate::runtime::{Runtime, TrBlockOn};
 
-impl Runtime {
-    /// 阻塞当前线程，等待 `future` 完成，同时不影响 smol 全局执行器的调度。
-    pub fn block_on<F>(future: F) -> F::Output
-    where
-        Self: TrBlockOn<F>,
-        F: Future + 'static,
-    {
-        <Runtime as TrBlockOn<F>>::block_on(future)
-    }
-}
-
 impl<F> TrBlockOn<F> for Runtime
 where
     F: Future + 'static,
