@@ -1,4 +1,5 @@
 test:
-    cargo test --features all_compio
-    cargo test --features all_smol
-    cargo test --features all_tokio
+    cargo test -p abs_art
+    cargo test -p abs_art-tokio
+    cargo test -p abs_art-compio
+    cargo test -p abs_art-smol

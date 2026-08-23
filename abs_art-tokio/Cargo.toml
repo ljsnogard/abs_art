@@ -1,0 +1,27 @@
+[package]
+name = "abs_art-tokio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+abs_art.workspace = true
+tokio.workspace = true
+
+[features]
+default = ["block_on", "delay", "spawn_send", "spawn_local", "spawn_blocking"]
+
+# 五个功能开关：按需启用，互不影响
+block_on = []
+delay = ["join_handle"]
+spawn_send = ["join_handle"]
+spawn_local = ["join_handle"]
+spawn_blocking = ["join_handle"]
+
+# 内部支持 feature：`JoinHandle` / `JoinError` 包装，被 `delay` 与 `spawn_*` 隐式启用
+join_handle = []

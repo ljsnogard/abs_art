@@ -1,0 +1,17 @@
+[package]
+name = "abs_art"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# 本 crate 是抽象层基础：不依赖任何异步运行时，只提供：
+#   - `Runtime` 枚举（运行时标签）
+#   - 一组 trait（`TrBlockOn` / `TrSpawnSend` / `TrSpawnLocal` / `TrSpawnBlocking` / `TrDelay`）
+# 具体实现分散在组合 crate（`abs_art-tokio` / `abs_art-compio` / `abs_art-smol`）中。
+
+[dependencies]

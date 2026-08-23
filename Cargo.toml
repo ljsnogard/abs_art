@@ -1,94 +1,25 @@
-﻿[package]
-name = "abs_art"
+[workspace]
+members = [
+    "abs_art",
+    "abs_art-tokio",
+    "abs_art-compio",
+    "abs_art-smol",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
 authors = ["lino <lino_snsalias@outlook.com>"]
+license = "MIT/Apache-2.0"
 description = "ABStraction of Asynchronous RunTime"
 homepage = "https://github.com/ljsnogard/abs_art"
 keywords = ["async", "futures", "tokio", "smol", "compio", "wrapper"]
 categories = ["no_std"]
-license = "MIT/Apache-2.0"
 readme = "README.md"
 
-[features]
-
-# level 2 features, smol
-all_smol = [
-    "smol_join_handle",
-    "smol_block_on",
-    "smol_delay",
-    "smol_spawn_send",
-    "smol_spawn_local",
-    "smol_spawn_blocking",
-    "runtime_smol",
-]
-smol_join_handle    = ["runtime_smol", "join_handle"]
-smol_block_on       = ["runtime_smol", "block_on"]
-smol_delay          = ["runtime_smol", "delay"]
-smol_spawn_send     = ["runtime_smol", "join_handle", "spawn_send"]
-smol_spawn_local    = ["runtime_smol", "join_handle", "spawn_local"]
-smol_spawn_blocking = ["runtime_smol", "join_handle", "spawn_blocking"]
-
-# level 2 features, compio
-all_compio = [
-    "compio_join_handle",
-    "compio_block_on",
-    "compio_delay",
-    "compio_spawn_send",
-    "compio_spawn_local",
-    "compio_spawn_blocking",
-    "runtime_compio",
-]
-compio_join_handle    = ["runtime_compio", "join_handle"]
-compio_block_on       = ["runtime_compio", "block_on"]
-compio_delay          = ["runtime_compio", "delay"]
-compio_spawn_send     = ["runtime_compio", "spawn_send"]
-compio_spawn_local    = ["runtime_compio", "spawn_local"]
-compio_spawn_blocking = ["runtime_compio", "spawn_blocking"]
-
-# level 2 features, tokio
-all_tokio = [
-    "tokio_join_handle",
-    "tokio_block_on",
-    "tokio_delay",
-    "tokio_spawn_send",
-    "tokio_spawn_local",
-    "tokio_spawn_blocking",
-    "runtime_tokio",
-]
-tokio_join_handle    = ["runtime_tokio", "join_handle"]
-tokio_block_on       = ["runtime_tokio", "block_on"]
-tokio_delay          = ["runtime_tokio", "delay"]
-tokio_spawn_send     = ["runtime_tokio", "spawn_send"]
-tokio_spawn_local    = ["runtime_tokio", "spawn_local"]
-tokio_spawn_blocking = ["runtime_tokio", "tokio/rt", "tokio/rt-multi-thread"]
-
-# level 1 features, they are needed in code #[cfg()]
-join_handle = []
-block_on = []
-delay = []
-spawn_send = ["join_handle"]
-spawn_local = ["join_handle"]
-spawn_blocking = ["join_handle"]
-
-# level 0 features, they can't exist together
-runtime_tokio = ["dep:tokio"]
-runtime_smol = ["dep:smol", "async-executor"]
-runtime_compio = ["dep:compio"]
-
-defaulut = [
-    # "all_compio",
-    "all_smol",
-    # "all_tokio",
-]
-
-[dependencies]
-pin-project = { version = "1.1.*" }
-pin-utils = { version = "0.1.0" }
-compio = { version = "0.19.*", optional = true }
-smol = { version = "2", optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
-
-# scoped-tls = { version = "1", optional = true }
-async-executor = { version = "1.5.*", optional = true }
+[workspace.dependencies]
+abs_art = { path = "abs_art" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+compio = { version = "0.19.*", features = ["time"] }
+smol = { version = "2" }

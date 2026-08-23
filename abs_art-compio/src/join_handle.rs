@@ -1,0 +1,74 @@
+//! [`JoinHandle`] / [`JoinError`]：对 compio 任务句柄的薄包装。
+
+use core::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use abs_art::runtime::TrJoinHandle;
+
+/// 包装 `compio::runtime::JoinHandle<T>`；await 它以获取 `Result<T, JoinError>`。
+pub struct JoinHandle<T> {
+    inner: compio::runtime::JoinHandle<T>,
+}
+
+impl<T> TrJoinHandle<T> for JoinHandle<T>
+where
+    T: 'static,
+{
+    type JoinErr = JoinError;
+}
+
+impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
+    #[inline]
+    fn from(handle: compio::runtime::JoinHandle<T>) -> Self {
+        JoinHandle { inner: handle }
+    }
+}
+
+impl<T> Future for JoinHandle<T>
+where
+    T: 'static,
+{
+    type Output = Result<T, JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // compio 的 JoinHandle 是 Unpin，可以直接投影。
+        let this = self.get_mut();
+        Pin::new(&mut this.inner)
+            .poll(cx)
+            .map(|res| res.map_err(JoinError))
+    }
+}
+
+/// compio 任务的 join 错误（包装 `compio::runtime::JoinError`）。
+pub struct JoinError(compio::runtime::JoinError);
+
+impl JoinError {
+    /// 取出内部的 compio join 错误。
+    pub fn into_inner(self) -> compio::runtime::JoinError {
+        self.0
+    }
+}
+
+impl core::convert::AsRef<compio::runtime::JoinError> for JoinError {
+    fn as_ref(&self) -> &compio::runtime::JoinError {
+        &self.0
+    }
+}
+
+impl fmt::Debug for JoinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for JoinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl core::error::Error for JoinError {}
