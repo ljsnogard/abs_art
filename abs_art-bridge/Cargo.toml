@@ -20,3 +20,5 @@ abs_art-smol   = { path = "../abs_art-smol", optional = true, version = "0.2.0" 
 backend-tokio = ["dep:abs_art-tokio"]
 backend-compio = ["dep:abs_art-compio"]
 backend-smol = ["dep:abs_art-smol"]
+
+default = ["backend-tokio"]
