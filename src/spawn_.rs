@@ -25,7 +25,7 @@ where
     spawn_impl_::spawn_blocking(future)
 }
 
-#[cfg(feature = "runtime-compio")]
+#[cfg(feature = "runtime_compio")]
 mod spawn_impl_ {
     use core::future::Future;
     use crate::task::JoinHandle;
@@ -55,7 +55,7 @@ mod spawn_impl_ {
     }
 }
 
-#[cfg(feature = "runtime-smol")]
+#[cfg(feature = "runtime_smol")]
 mod spawn_impl_ {
     use core::future::Future;
     use crate::task::JoinHandle;
@@ -97,7 +97,7 @@ mod spawn_impl_ {
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(feature = "runtime_tokio")]
 mod spawn_impl_ {
     use core::future::Future;
     use tokio::task;
@@ -130,8 +130,8 @@ mod spawn_impl_ {
 
 #[cfg(not(any(
     feature = "runtime-async-std",
-    feature = "runtime-tokio",
-    feature = "runtime-smol"
+    feature = "runtime_tokio",
+    feature = "runtime_smol"
 )))]
 mod spawn_impl_ {
     use core::future::Future;

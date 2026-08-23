@@ -10,6 +10,9 @@ pub mod runtime;
 #[cfg(feature = "join_handle")]
 pub mod join_handle;
 
+#[cfg(feature = "delay")]
+pub mod delay;
+
 #[cfg(feature = "block_on")]
 pub mod block_on;
 
@@ -29,21 +32,21 @@ pub use runtime::TrSpawnLocal;
 
 #[cfg(any(
     all(
-        feature = "runtime-compio",
-        feature = "runtime-tokio",
-        feature = "runtime-smol"
+        feature = "runtime_compio",
+        feature = "runtime_tokio",
+        feature = "runtime_smol"
     ),
     all(
-        feature = "runtime-compio",
-        any(feature = "runtime-tokio", feature = "runtime-smol")
+        feature = "runtime_compio",
+        any(feature = "runtime_tokio", feature = "runtime_smol")
     ),
     all(
-        feature = "runtime-tokio",
-        any(feature = "runtime-compio", feature = "runtime-smol")
+        feature = "runtime_tokio",
+        any(feature = "runtime_compio", feature = "runtime_smol")
     ),
     all(
-        feature = "runtime-smol",
-        any(feature = "runtime-compio", feature = "runtime-tokio")
+        feature = "runtime_smol",
+        any(feature = "runtime_compio", feature = "runtime_tokio")
     ),
 ))]
 compile_error!("ONE and ONLY ONE runtime feature can be enabled at the same time");

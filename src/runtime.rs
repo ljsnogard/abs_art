@@ -6,22 +6,20 @@ pub enum Runtime {
     Compio,
     Smol,
     Tokio,
+    Unexpected,
 }
 
 impl Runtime {
-    #[cfg(feature = "runtime-compio")]
     pub const fn current() -> Self {
-        Runtime::Compio
-    }
-
-    #[cfg(feature = "runtime-smol")]
-    pub const fn current() -> Self {
-        Runtime::Smol
-    }
-
-    #[cfg(feature = "runtime-tokio")]
-    pub const fn current() -> Self {
-        Runtime::Tokio
+        if cfg!(feature = "runtime_compio") {
+            Runtime::Compio
+        } else if cfg!(feature = "runtime_smol") {
+            Runtime::Smol
+        } else if cfg!(feature = "runtime_tokio") {
+            Runtime::Tokio
+        } else {
+            Runtime::Unexpected
+        }
     }
 }
 
@@ -114,4 +112,10 @@ where
     <F as Future>::Output: 'static,
 {
     fn block_on(f: F) -> F::Output;
+}
+
+/// Pause current execution context for a while
+#[cfg(feature = "delay")]
+pub trait TrDelay {
+    fn delay(duration: core::time::Duration) -> impl Future<Output = ()>;
 }

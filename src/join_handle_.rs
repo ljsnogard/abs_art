@@ -1,6 +1,6 @@
 ﻿
 
-#[cfg(feature = "runtime-compio")]
+#[cfg(feature = "runtime_compio")]
 impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
     #[inline]
     fn from(handle: compio::runtime::JoinHandle<T>) -> Self {
@@ -8,14 +8,14 @@ impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
     }
 }
 
-#[cfg(feature = "runtime-smol")]
+#[cfg(feature = "runtime_smol")]
 impl<T> From<smol::Task<T>> for JoinHandle<T> {
     fn from(handle: smol::Task<T>) -> Self {
         JoinHandle::from_wrapper(RtHandleWrapper::<T>::from_runtime_handle(handle))
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(feature = "runtime_tokio")]
 impl<T> From<tokio::task::JoinHandle<T>> for JoinHandle<T> {
     fn from(handle: tokio::task::JoinHandle<T>) -> Self {
         JoinHandle::from_wrapper(RtHandleWrapper::<T>::from_runtime_handle(handle))
@@ -23,12 +23,12 @@ impl<T> From<tokio::task::JoinHandle<T>> for JoinHandle<T> {
 }
 
 
-#[cfg(feature = "runtime-compio")]
+#[cfg(feature = "runtime_compio")]
 mod runtime_spec_impl_ {
 
 }
 
-#[cfg(feature = "runtime-smol")]
+#[cfg(feature = "runtime_smol")]
 mod runtime_spec_impl_ {
     use core::{
         convert::Infallible,
@@ -84,7 +84,7 @@ mod runtime_spec_impl_ {
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(feature = "runtime_tokio")]
 mod join_impl_ {
 
 }
