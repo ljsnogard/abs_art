@@ -9,6 +9,43 @@
 //! - `spawn_blocking`：投递阻塞函数到阻塞线程池。
 //!
 //! 所有实现都基于基础 crate [`abs_art`] 中的 trait。
+//!
+//! # 两种用法
+//!
+//! ## 具体用法（二进制层）
+//!
+//! 直接调用全功能 [`Runtime`] 的关联方法：
+//!
+//! ```
+//! use abs_art_tokio::Runtime;
+//!
+//! let rt = tokio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async { Runtime::block_on(async { 42 }) });
+//! ```
+//!
+//! ## Tag 用法（业务库层，编译期能力检查）
+//!
+//! 通过 const 泛型声明所需能力；请求了未声明（或本后端不支持）的能力会在
+//! 编译期报错：
+//!
+//! ```
+//! use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn, TrSpawnLocal};
+//! use abs_art_tokio::Runtime;
+//!
+//! // 只声明 block_on + spawn_local 两种能力
+//! let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
+//! let _ = rt;
+//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(async { 1 });
+//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrSpawnLocal<_>>::spawn_local(async { 2 });
+//! ```
+//!
+//! ```compile_fail
+//! use abs_art::{BLOCK_ON, TrSpawnSend};
+//! use abs_art_tokio::Runtime;
+//!
+//! // 只声明了 block_on 能力，spawn（spawn_send）不可用 → 编译错误（Tag 严格模式）
+//! let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend<_>>::spawn(async { 1 });
+//! ```
 
 #![no_std]
 
@@ -16,22 +53,35 @@
 extern crate std;
 
 pub use abs_art::{
-    Runtime as RuntimeTag, TrBlockOn, TrDelay, TrSpawnBlocking, TrSpawnLocal,
-    TrSpawnSend,
+    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, TrAsyncRuntime,
+    TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal, TrSpawnSend,
 };
+pub use abs_art::Runtime as RuntimeTag;
 
 /// tokio 组合运行时标记类型。
 ///
 /// 对应基础 crate 中的 [`RuntimeTag::Tokio`]。由于孤儿规则（trait 与类型都
 /// 来自 `abs_art` 时无法在外部 crate 中为它实现 trait），每个组合 crate 都
 /// 定义自己的本地 `Runtime` 类型，并为它实现 `abs_art` 中的全部 trait。
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Runtime;
+///
+/// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认 [`FULL`]（全功能），
+/// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_LOCAL }>` 只声明部分能力。
+pub struct Runtime<const CAPS: usize = FULL>;
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 返回本 crate 对应的抽象运行时标签。
     pub const fn tag() -> RuntimeTag {
         RuntimeTag::Tokio
+    }
+}
+
+impl<const CAPS: usize> Runtime<CAPS> {
+    /// 返回当前运行时（零大小标记值）。
+    ///
+    /// 当 `CAPS` 未显式指定时（`Runtime::current()`），需要类型标注或通过
+    /// 类型别名使用，例如 `let rt: Runtime = Runtime::current();`。
+    pub const fn current() -> Self {
+        Self
     }
 }
 

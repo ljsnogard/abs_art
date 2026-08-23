@@ -9,9 +9,9 @@ use core::future::Future;
 use compio::runtime::Runtime as CompioRuntime;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::TrSpawnLocal;
+use abs_art::{FULL, HasSpawnLocal, TrSpawnLocal};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 把 `future` 投递到当前 compio 运行时的工作队列（线程本地），返回
     /// [`JoinHandle`]。
     pub fn spawn_local<F>(future: F) -> JoinHandle<F::Output>
@@ -24,10 +24,11 @@ impl Runtime {
     }
 }
 
-impl<F> TrSpawnLocal<F> for Runtime
+impl<F, const CAPS: usize> TrSpawnLocal<F> for Runtime<CAPS>
 where
     F: Future + 'static,
     <F as Future>::Output: 'static,
+    [(); CAPS]: HasSpawnLocal,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 

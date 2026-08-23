@@ -3,9 +3,9 @@
 use core::future::Future;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::TrSpawnSend;
+use abs_art::{FULL, HasSpawnSend, TrSpawnSend};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 把 `future` 投递到 smol 的全局工作队列，返回 [`JoinHandle`]。
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
@@ -17,10 +17,11 @@ impl Runtime {
     }
 }
 
-impl<F> TrSpawnSend<F> for Runtime
+impl<F, const CAPS: usize> TrSpawnSend<F> for Runtime<CAPS>
 where
     F: Future + Send + 'static,
     <F as Future>::Output: Send + 'static,
+    [(); CAPS]: HasSpawnSend,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 

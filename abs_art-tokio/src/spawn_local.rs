@@ -3,9 +3,9 @@
 use core::future::Future;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::TrSpawnLocal;
+use abs_art::{FULL, HasSpawnLocal, TrSpawnLocal};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 把 `future` 投递到 tokio 的线程本地队列，返回 [`JoinHandle`]。
     ///
     /// 必须在 `tokio::task::LocalSet` 的上下文内调用（例如在
@@ -21,15 +21,16 @@ impl Runtime {
     }
 }
 
-impl<F> TrSpawnLocal<F> for Runtime
+impl<F, const CAPS: usize> TrSpawnLocal<F> for Runtime<CAPS>
 where
     F: Future + 'static,
     <F as Future>::Output: 'static,
+    [(); CAPS]: HasSpawnLocal,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn_local(future: F) -> JoinHandle<F::Output> {
-        Runtime::spawn_local(future)
+    fn spawn_local(future: F) -> Self::JoinHandle<F::Output> {
+        tokio::task::spawn_local(future).into()
     }
 }
 

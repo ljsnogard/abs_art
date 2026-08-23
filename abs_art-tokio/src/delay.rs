@@ -3,7 +3,7 @@
 use core::time::Duration;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::TrDelay;
+use abs_art::{HasDelay, TrDelay};
 
 /// 异步地睡眠 `duration`。
 pub async fn sleep(duration: Duration) {
@@ -25,7 +25,10 @@ where
     .into()
 }
 
-impl TrDelay for Runtime {
+impl<const CAPS: usize> TrDelay for Runtime<CAPS>
+where
+    [(); CAPS]: HasDelay,
+{
     /// 返回一个等待 `duration` 之后完成的 future。
     fn delay(duration: Duration) -> impl Future<Output = ()> {
         tokio::time::sleep(duration)

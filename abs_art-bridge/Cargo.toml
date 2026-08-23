@@ -1,0 +1,22 @@
+[package]
+name = "abs_art-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+abs_art.workspace = true
+abs_art-tokio = { workspace = true, optional = true }
+abs_art-compio = { workspace = true, optional = true }
+abs_art-smol = { workspace = true, optional = true }
+
+[features]
+# 通过 Cargo.toml 选择后端（必须且只能启用一个）
+backend-tokio = ["dep:abs_art-tokio"]
+backend-compio = ["dep:abs_art-compio"]
+backend-smol = ["dep:abs_art-smol"]

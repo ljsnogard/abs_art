@@ -5,9 +5,9 @@ use core::future::Future;
 use compio::runtime::Runtime as CompioRuntime;
 
 use crate::Runtime;
-use abs_art::TrBlockOn;
+use abs_art::{FULL, HasBlockOn, TrBlockOn};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 阻塞当前线程，等待 `future` 完成，同时不影响 compio 运行时的调度。
     ///
     /// 必须在 compio 运行时上下文内调用（例如在 `Runtime::block_on` 或某个
@@ -22,9 +22,11 @@ impl Runtime {
     }
 }
 
-impl<F> TrBlockOn<F> for Runtime
+impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
 where
     F: Future + 'static,
+    <F as Future>::Output: 'static,
+    [(); CAPS]: HasBlockOn,
 {
     /// 通过 `CompioRuntime::with_current` 获取当前线程的环境运行时，再调用其
     /// `block_on` 阻塞驱动 `future`。
@@ -162,5 +164,28 @@ mod tests {
     #[should_panic(expected = "not in a compio runtime")]
     fn block_on_outside_runtime_panics() {
         Runtime::block_on(async { 42 });
+    }
+
+    /// 目的：验证 Tag 模式下，声明了 `BLOCK_ON` 能力的 `Runtime<Caps>` 确实
+    /// 实现了 `TrBlockOn`（编译期能力检查的正向用例）。
+    ///
+    /// 实施策略：在 compio 运行时上下文内，用
+    /// `Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>` 的 trait 关联函数调用
+    /// `block_on` 驱动一个 future。
+    ///
+    /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait
+    /// impl 有误，将无法编译。
+    #[test]
+    fn tagged_runtime_implements_block_on() {
+        use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
+
+        let rt = CompioRuntime::new().unwrap();
+
+        let out = rt.block_on(async {
+            <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(async {
+                40 + 2
+            })
+        });
+        assert_eq!(out, 42);
     }
 }

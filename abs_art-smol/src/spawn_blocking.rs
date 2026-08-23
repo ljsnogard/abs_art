@@ -1,9 +1,9 @@
 //! `spawn_blocking`：把阻塞函数投递到 smol 的阻塞线程池。
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::TrSpawnBlocking;
+use abs_art::{FULL, HasSpawnBlocking, TrSpawnBlocking};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 把阻塞函数 `f` 投递到 smol 的阻塞线程池（`smol::unblock`），返回
     /// [`JoinHandle`]。
     pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
@@ -16,10 +16,11 @@ impl Runtime {
     }
 }
 
-impl<F, T> TrSpawnBlocking<F, T> for Runtime
+impl<F, T, const CAPS: usize> TrSpawnBlocking<F, T> for Runtime<CAPS>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
+    [(); CAPS]: HasSpawnBlocking,
 {
     type JoinHandle = JoinHandle<T> where F: 'static;
 

@@ -8,7 +8,9 @@ use core::{
     task::{Context, Poll},
 };
 
-use abs_art::runtime::TrJoinHandle;
+use abs_art::{runtime::TrJoinHandle, TrAsyncRuntime};
+
+use crate::Runtime;
 
 /// 包装 `smol::Task<T>`；await 它以获取 `Result<T, JoinError>`。
 ///
@@ -30,6 +32,11 @@ where
     T: 'static,
 {
     type JoinErr = JoinError;
+}
+
+/// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
+impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
+    type JoinHandle<T> = JoinHandle<T> where T: 'static;
 }
 
 impl<T> From<smol::Task<T>> for JoinHandle<T> {

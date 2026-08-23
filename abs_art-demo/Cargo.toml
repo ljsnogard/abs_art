@@ -1,0 +1,17 @@
+[package]
+name = "abs_art-demo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[dependencies]
+# 后端选择：只改这一行 feature（backend-tokio / backend-compio / backend-smol），
+# 业务代码（src/lib.rs）零改动。
+abs_art-bridge = { workspace = true, features = ["backend-tokio"] }
+tokio.workspace = true

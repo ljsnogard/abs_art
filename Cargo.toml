@@ -4,6 +4,8 @@ members = [
     "abs_art-tokio",
     "abs_art-compio",
     "abs_art-smol",
+    "abs_art-bridge",
+    "abs_art-demo",
 ]
 resolver = "3"
 
@@ -20,6 +22,10 @@ readme = "README.md"
 
 [workspace.dependencies]
 abs_art = { path = "abs_art" }
+abs_art-tokio = { path = "abs_art-tokio" }
+abs_art-compio = { path = "abs_art-compio" }
+abs_art-smol = { path = "abs_art-smol" }
+abs_art-bridge = { path = "abs_art-bridge" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 compio = { version = "0.19.*", features = ["time"] }
 smol = { version = "2" }

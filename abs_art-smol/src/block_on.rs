@@ -3,9 +3,9 @@
 use core::future::Future;
 
 use crate::Runtime;
-use abs_art::TrBlockOn;
+use abs_art::{FULL, HasBlockOn, TrBlockOn};
 
-impl Runtime {
+impl Runtime<FULL> {
     /// 阻塞当前线程，等待 `future` 完成。
     ///
     /// smol 的 `block_on` 不依赖任何「环境运行时」，可以在任何线程直接使用。
@@ -18,9 +18,11 @@ impl Runtime {
     }
 }
 
-impl<F> TrBlockOn<F> for Runtime
+impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
 where
     F: Future + 'static,
+    <F as Future>::Output: 'static,
+    [(); CAPS]: HasBlockOn,
 {
     /// 直接调用 `smol::block_on`（其底层是 `async_io::block_on`）：在当前
     /// 线程上轮询 future 并驱动 async-io reactor，直到 future 完成。
@@ -98,6 +100,24 @@ mod tests {
     /// 通过依据：若 10 秒内 `Runtime::block_on` 返回且计数达到目标值（10_000），
     /// 说明后台任务在 block_on 阻塞期间确实被调度执行了，测试通过；若全局执行器
     /// 被干扰而无法推进，等待循环将永远无法退出，超时失败。
+    /// 目的：验证 Tag 模式下，声明了 `BLOCK_ON` 能力的 `Runtime<Caps>` 确实
+    /// 实现了 `TrBlockOn`（编译期能力检查的正向用例）。
+    ///
+    /// 实施策略：用 `Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>` 的 trait 关联函数
+    /// 调用 `block_on` 驱动一个 future。
+    ///
+    /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait
+    /// impl 有误，将无法编译。
+    #[test]
+    fn tagged_runtime_implements_block_on() {
+        use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
+
+        let out = <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(
+            async { 40 + 2 },
+        );
+        assert_eq!(out, 42);
+    }
+
     #[test]
     fn block_on_does_not_block_global_executor() {
         const TARGET: usize = 10_000;
