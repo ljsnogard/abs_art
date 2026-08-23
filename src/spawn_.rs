@@ -25,10 +25,9 @@ where
     spawn_impl_::spawn_blocking(future)
 }
 
-#[cfg(feature = "runtime-async-std")]
+#[cfg(feature = "runtime-compio")]
 mod spawn_impl_ {
     use core::future::Future;
-    use async_std::task;
     use crate::task::JoinHandle;
 
     pub fn spawn<F, T>(future: F) -> JoinHandle<T>

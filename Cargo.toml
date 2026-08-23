@@ -1,26 +1,41 @@
 ﻿[package]
 name = "abs_art"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 authors = ["lino <lino_snsalias@outlook.com>"]
 description = "ABStraction of Asynchronous RunTime"
 homepage = "https://github.com/ljsnogard/abs_art"
-keywords = ["async", "tokio", "async_std", "smol", "wrapper"]
-categories = []
+keywords = ["async", "futures", "tokio", "smol", "compio", "wrapper"]
+categories = ["no_std"]
 license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [features]
-default = ["runtime-tokio"]
-runtime-async-std = ["async-std"]
-runtime-tokio = ["tokio"]
-runtime-smol = ["smol", "scoped-tls", "async-executor"]
+join_handle = []
+block_on = []
+spawn_send = ["join_handle"]
+spawn_local = ["join_handle"]
+spawn_blocking = ["join_handle"]
+
+runtime-tokio = ["dep:tokio"]
+runtime-smol = ["dep:smol", "scoped-tls", "async-executor"]
+runtime-compio = ["dep:compio"]
+
+default = [
+    # "runtime-compio",
+    "runtime-tokio",
+    # "runtime-smol",
+    "block_on",
+    "spawn_blocking",
+    "spawn_send",
+    "spawn_local",
+]
 
 [dependencies]
 pin-project = { version = "1.1.*" }
 pin-utils = { version = "0.1.0" }
-async-std = { version = "1.12.*", features = ["attributes", "unstable"], optional = true }
+compio = { version = "0.19.*", optional = true }
 smol = { version = "2", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 

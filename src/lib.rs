@@ -1,45 +1,49 @@
-pub mod task;
+#![feature(impl_trait_in_assoc_type)]
 
-pub enum Runtime {
-    AsyncStd,
-    Smol,
-    Tokio,
-}
+#![no_std]
 
-impl Runtime {
-    #[cfg(feature = "runtime-async-std")]
-    pub const fn current() -> Self {
-        Runtime::AsyncStd
-    }
+#[cfg(test)]
+extern crate std;
 
-    #[cfg(feature = "runtime-smol")]
-    pub const fn current() -> Self {
-        Runtime::Smol
-    }
+pub mod runtime;
 
-    #[cfg(feature = "runtime-tokio")]
-    pub const fn current() -> Self {
-        Runtime::Tokio
-    }
-}
+#[cfg(feature = "join_handle")]
+pub mod join_handle;
+
+#[cfg(feature = "block_on")]
+pub mod block_on;
+
+#[cfg(feature = "join_handle")]
+pub use join_handle::{JoinHandle, JoinError};
+
+pub use runtime::Runtime;
+
+#[cfg(feature = "spawn_send")]
+pub use runtime::TrSpawnSend;
+
+#[cfg(feature = "spawn_blocking")]
+pub use runtime::TrSpawnBlocking;
+
+#[cfg(feature = "spawn_local")]
+pub use runtime::TrSpawnLocal;
 
 #[cfg(any(
     all(
-        feature = "runtime-async-std",
+        feature = "runtime-compio",
         feature = "runtime-tokio",
         feature = "runtime-smol"
     ),
     all(
-        feature = "runtime-async-std",
+        feature = "runtime-compio",
         any(feature = "runtime-tokio", feature = "runtime-smol")
     ),
     all(
         feature = "runtime-tokio",
-        any(feature = "runtime-async-std", feature = "runtime-smol")
+        any(feature = "runtime-compio", feature = "runtime-smol")
     ),
     all(
         feature = "runtime-smol",
-        any(feature = "runtime-async-std", feature = "runtime-tokio")
+        any(feature = "runtime-compio", feature = "runtime-tokio")
     ),
 ))]
 compile_error!("ONE and ONLY ONE runtime feature can be enabled at the same time");
