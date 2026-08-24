@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-abs_art = { path = "../abs_art", version = "0.2.0" }
+abs_art = { path = "../abs_art", version = "0.2.1" }
 smol = { workspace = true }
 
 [features]
