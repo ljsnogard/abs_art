@@ -20,8 +20,7 @@ impl Runtime<FULL> {
 
 impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
 where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
+    F: Future,
     [(); CAPS]: HasBlockOn,
 {
     /// 直接调用 `smol::block_on`（其底层是 `async_io::block_on`）：在当前

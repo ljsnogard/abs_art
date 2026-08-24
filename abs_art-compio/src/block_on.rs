@@ -24,8 +24,7 @@ impl Runtime<FULL> {
 
 impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
 where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
+    F: Future,
     [(); CAPS]: HasBlockOn,
 {
     /// 通过 `CompioRuntime::with_current` 获取当前线程的环境运行时，再调用其

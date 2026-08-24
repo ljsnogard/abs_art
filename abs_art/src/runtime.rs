@@ -79,8 +79,7 @@ where
 /// 让当前线程阻塞等待一个异步任务完成，同时不影响运行时的调度。
 pub trait TrBlockOn<F>
 where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
+    F: Future,
 {
     /// 阻塞当前线程，等待 `f` 完成并返回其结果。
     fn block_on(f: F) -> F::Output;

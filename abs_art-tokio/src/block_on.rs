@@ -23,8 +23,7 @@ impl Runtime<FULL> {
 
 impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
 where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
+    F: Future,
     [(); CAPS]: HasBlockOn,
 {
     /// 先通过 `tokio::task::block_in_place` 把当前 worker 线程（及其任务队列）
