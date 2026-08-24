@@ -97,6 +97,8 @@ abs_art-bridge     桥接：backend-tokio / backend-compio / backend-smol 三选
                    把 Runtime 与全部 trait / 能力常量重导出给业务代码
 
 abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后端）
+                    examples/ 下按后端分组（tokio_demo / compio_demo）的
+                    每种 cap 一个 smoke test（features：demo-tokio / demo-compio）
 ```
 
 依赖关系（业务库只碰 bridge）：
@@ -131,6 +133,16 @@ abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后�
 ```sh
 cargo test --workspace        # 全部 crate 的测试
 cargo run -p abs_art-demo     # 运行演示（业务库 + tokio 后端）
+just demo                     # 跑 abs_art-demo 两组 cap smoke tests（tokio + compio）
+```
+
+`abs_art-demo` 的 smoke tests 按后端分组（`examples/tokio_demo/` 与
+`examples/compio_demo/`，每种 cap 组合一个 example）：
+
+```sh
+just demo-tokio                                             # tokio 组（默认 features）
+just demo-compio                                            # compio 组（--no-default-features --features demo-compio）
+cargo run -p abs_art-demo --no-default-features --features demo-compio   # compio 后端跑 main
 ```
 
 # develop
