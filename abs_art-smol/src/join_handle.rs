@@ -91,12 +91,14 @@ where
 pub struct JoinError(Infallible);
 
 impl fmt::Debug for JoinError {
+    #[allow(unreachable_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
 impl fmt::Display for JoinError {
+    #[allow(unreachable_code)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }

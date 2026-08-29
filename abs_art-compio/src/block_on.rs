@@ -16,7 +16,7 @@ impl Runtime<FULL> {
     pub fn block_on<F>(future: F) -> F::Output
     where
         Self: TrBlockOn<F>,
-        F: Future + 'static,
+        F: Future,
     {
         <Self as TrBlockOn<F>>::block_on(future)
     }
