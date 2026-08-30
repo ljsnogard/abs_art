@@ -30,6 +30,15 @@ where
     T: 'static,
 {
     type JoinErr = JoinError;
+
+    /// compio 有原生 `JoinHandle::detach`：丢弃任务句柄而不取消任务，任务
+    /// 继续在当前运行时的工作队列里推进，完成后输出被丢弃。
+    ///
+    /// **不能**靠 drop 实现：compio 的 `JoinHandle` 在 drop 时会
+    /// `cancel(true)` 取消任务——必须显式调用原生 `detach`。
+    fn detach(self) {
+        self.inner.detach();
+    }
 }
 
 impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
@@ -83,3 +92,45 @@ impl fmt::Display for JoinError {
 }
 
 impl core::error::Error for JoinError {}
+
+#[cfg(test)]
+mod tests {
+    //! 针对 compio 后端 `TrJoinHandle::detach` 的单元测试。
+
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use compio::runtime::Runtime as CompioRuntime;
+
+    use abs_art::TrJoinHandle;
+
+    use crate::Runtime;
+
+    /// 目的：验证 `detach` 后任务仍在 compio 运行时的工作队列里推进。
+    ///
+    /// 实施策略：`Runtime::spawn` 一个设置 `AtomicBool` 的任务，`detach`
+    /// 句柄（不 await），然后 `sleep` 让出——compio 的 `block_on` 在等待
+    /// 期间会 tick 运行时队列，detach 的任务因此有机会执行并置位。
+    ///
+    /// 通过依据：标志在 `block_on` 返回前被置位——若 detach 实现错误地触发
+    /// 了取消（compio JoinHandle 的 drop 会 cancel），标志永远不会置位。
+    #[test]
+    fn detach_keeps_task_running() {
+        let rt = CompioRuntime::new().unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+
+        rt.block_on(async {
+            let handle = Runtime::spawn(async move {
+                f.store(true, Ordering::SeqCst);
+            });
+            handle.detach();
+            // 让出：compio 的 block_on 在等待期间会驱动运行时队列
+            compio::runtime::time::sleep(std::time::Duration::from_millis(10)).await;
+        });
+
+        assert!(flag.load(Ordering::SeqCst), "detach 后任务未被调度执行");
+    }
+}

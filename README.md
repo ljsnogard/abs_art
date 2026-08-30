@@ -86,6 +86,8 @@ abs_art            基础 crate：不依赖任何运行时
                     ├─ enum Runtime（运行时标签）
                     ├─ trait：TrBlockOn / TrSpawnSend / TrSpawnLocal /
                     │          TrSpawnBlocking / TrDelay / TrAsyncRuntime / TrJoinHandle
+                    │          （TrJoinHandle::detach：smol/compio 原生支持，
+                    │           tokio 无原生 detach，drop 句柄即 detach——语义等价）
                     └─ caps：能力位掩码（BLOCK_ON / DELAY / SPAWN_SEND /
                               SPAWN_LOCAL / SPAWN_BLOCKING）与类型级标记
 

@@ -37,6 +37,17 @@ where
     T: 'static,
 {
     type JoinErr = JoinError;
+
+    /// tokio 没有原生的 `detach` 方法；官方文档明确「drop `JoinHandle` 即
+    /// detach」——任务继续在后台运行，只是失去等待它的句柄。因此这里直接
+    /// 丢弃包装（内部持有的 `tokio::task::JoinHandle` 随之 drop，触发 detach
+    /// 语义），与 tokio 一致。
+    ///
+    /// 注意：**不能**用 `abort()` 实现——abort 是取消任务，detach 是让任务
+    /// 继续跑完，两者语义相反。
+    fn detach(self) {
+        drop(self);
+    }
 }
 
 impl<T> Future for JoinHandle<T>
@@ -83,3 +94,52 @@ impl fmt::Display for JoinError {
 }
 
 impl core::error::Error for JoinError {}
+
+#[cfg(test)]
+mod tests {
+    //! 针对 tokio 后端 `TrJoinHandle::detach` 的单元测试。
+
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use abs_art::TrJoinHandle;
+
+    use crate::Runtime;
+
+    /// 目的：验证 `detach` 后任务仍在后台运行（tokio 的 drop 即 detach 语义）。
+    ///
+    /// 实施策略：spawn 一个设置 `AtomicBool` 的任务，`detach` 句柄（不再
+    /// await），然后在外层 `block_on` 里循环 `yield_now` 直到标志被置位。
+    ///
+    /// 通过依据：标志最终为 `true`——若 detach 错误地取消/等待了任务，
+    /// 循环会因超时断言失败；若 detach 正常工作，后台 worker 线程会执行
+    /// 任务并置位。
+    #[test]
+    fn detach_keeps_task_running() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .build()
+            .unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+
+        rt.block_on(async {
+            let handle = Runtime::spawn(async move {
+                tokio::task::yield_now().await;
+                f.store(true, Ordering::SeqCst);
+            });
+            handle.detach();
+
+            // 句柄已消费，只能靠后台任务自己置位
+            let mut spins = 0;
+            while !flag.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+                spins += 1;
+                assert!(spins < 1_000_000, "detach 后任务未推进");
+            }
+        });
+
+        assert!(flag.load(Ordering::SeqCst));
+    }
+}

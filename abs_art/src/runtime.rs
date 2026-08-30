@@ -32,6 +32,31 @@ where
     Self: Future<Output = Result<T, Self::JoinErr>>
 {
     type JoinErr: core::error::Error;
+
+    /// 让任务脱离句柄，继续在后台运行，不再能 join / await 其结果。
+    ///
+    /// `detach` 消费掉句柄本身：调用后任务仍在运行时的队列里继续推进，
+    /// 但调用方失去了等待它完成的能力（任务完成后其输出会被丢弃）。
+    ///
+    /// # 三个后端的支持情况（可行性结论）
+    ///
+    /// - **tokio**：无原生 `detach` 方法（`JoinHandle` 只有 `abort` /
+    ///   `is_finished` / `abort_handle` / `id`）；官方文档明确「drop 句柄
+    ///   即 detach」——任务继续在后台运行。实现为丢弃句柄即可，语义正确。
+    /// - **smol**：有原生 `Task::detach`（底层 async-task：置 detached 标志
+    ///   后 forget）。**不能**靠 drop 实现：async-task 的 `Task` 在 drop 时
+    ///   会 `set_canceled()` 取消任务。
+    /// - **compio**：有原生 `JoinHandle::detach`（丢弃任务句柄而不取消）。
+    ///   **不能**靠 drop 实现：compio 的 `JoinHandle` 在 drop 时会
+    ///   `cancel(true)` 取消任务。
+    ///
+    /// # 已知限制
+    ///
+    /// smol 后端的 `spawn_local` 任务：其本地执行器随句柄存活（句柄 poll 时
+    /// 驱动执行器），detach 消费句柄后执行器被销毁，本地任务无法继续推进
+    /// （等同取消）。因此 smol 的 `detach` 只对 `spawn`（全局执行器）任务有
+    /// 完整语义。
+    fn detach(self);
 }
 
 /// 运行时可以把任务投递到全局（跨线程）工作窃取队列。

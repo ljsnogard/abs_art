@@ -30,8 +30,8 @@ demo-compio = ["dep:bridge_compio", "dep:compio"]
 # 由上面的 demo-* feature 二选一启用，保证任何一次构建里 bridge 恰好只启用
 # 一个 backend（bridge 内部对「零个 / 多个 backend」都有 compile_error 检查）。
 # 业务代码（src/lib.rs + examples）通过这两个名字访问「当前后端」的 bridge。
-bridge_tokio  = { package = "abs_art-bridge", path = "../abs_art-bridge", version = "0.2.1", default-features = false, features = ["backend-tokio"],  optional = true }
-bridge_compio = { package = "abs_art-bridge", path = "../abs_art-bridge", version = "0.2.1", default-features = false, features = ["backend-compio"], optional = true }
+bridge_tokio  = { package = "abs_art-bridge", path = "../abs_art-bridge", version = "0.2.2", default-features = false, features = ["backend-tokio"],  optional = true }
+bridge_compio = { package = "abs_art-bridge", path = "../abs_art-bridge", version = "0.2.2", default-features = false, features = ["backend-compio"], optional = true }
 
 # 直接依赖：只用于「创建运行时」的集成方代码（src/main.rs / tests / examples 的 main）。
 # 业务函数本身不感知它们。

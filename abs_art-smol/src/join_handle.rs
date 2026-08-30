@@ -32,6 +32,22 @@ where
     T: 'static,
 {
     type JoinErr = JoinError;
+
+    /// smol 有原生 `Task::detach`（底层 async-task：置 detached 标志后 forget），
+    /// 任务继续在全局执行器的后台线程上运行，完成后输出被丢弃。
+    ///
+    /// **不能**靠 drop 实现：async-task 的 `Task` 在 drop 时会 `set_canceled()`
+    /// 取消任务——必须显式调用原生 `detach`。
+    ///
+    /// 限制：`spawn_local` 投递的本地任务，其本地执行器随本句柄存活（句柄
+    /// poll 时驱动执行器）；detach 消费句柄后执行器随之销毁，任务无法继续
+    /// 被驱动（等同取消）。因此 smol 后端的 `detach` 只对 `spawn`（全局执行器）
+    /// 任务有完整语义。
+    fn detach(self) {
+        self.inner.detach();
+        // 部分移动：inner 已消费；local_ex（若有）随函数结束被 drop，
+        // 本地执行器销毁 → 本地任务无法继续推进（见上面的限制说明）
+    }
 }
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
@@ -105,3 +121,49 @@ impl fmt::Display for JoinError {
 }
 
 impl core::error::Error for JoinError {}
+
+#[cfg(test)]
+mod tests {
+    //! 针对 smol 后端 `TrJoinHandle::detach` 的单元测试。
+
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    };
+
+    use abs_art::TrJoinHandle;
+
+    use crate::Runtime;
+
+    /// 目的：验证 `detach` 后任务在 smol 全局执行器的后台线程上继续运行。
+    ///
+    /// 实施策略：用 `Runtime::spawn`（全局执行器，由 smol 的后台线程驱动）
+    /// 投递一个设置 `AtomicBool` 的任务，`detach` 句柄（不 await），然后轮询
+    /// 标志直到置位（带期限）。
+    ///
+    /// 通过依据：标志在期限内被置位——若实现错误地用 drop（async-task 的
+    /// drop 会 `set_canceled` 取消任务），任务永远不会执行，测试超时失败。
+    #[test]
+    fn detach_keeps_task_running() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let f = flag.clone();
+
+        smol::block_on(async {
+            let handle = Runtime::spawn(async move {
+                smol::future::yield_now().await;
+                f.store(true, Ordering::SeqCst);
+            });
+            handle.detach();
+        });
+
+        // 全局执行器由后台线程驱动，detach 的任务应该已经/即将置位
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !flag.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(flag.load(Ordering::SeqCst), "detach 后任务未在后台运行");
+    }
+}
