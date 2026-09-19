@@ -20,7 +20,7 @@ impl Runtime<FULL> {
     /// 把 `future` 投递到线程本地执行器，返回 [`JoinHandle`]。
     pub fn spawn_local<F>(future: F) -> JoinHandle<F::Output>
     where
-        Self: TrSpawnLocal<F>,
+        Self: TrSpawnLocal,
         F: Future + 'static,
         <F as Future>::Output: 'static,
     {
@@ -30,15 +30,17 @@ impl Runtime<FULL> {
     }
 }
 
-impl<F, const CAPS: usize> TrSpawnLocal<F> for Runtime<CAPS>
+impl<const CAPS: usize> TrSpawnLocal for Runtime<CAPS>
 where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
     [(); CAPS]: HasSpawnLocal,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn_local(future: F) -> JoinHandle<F::Output> {
+    fn spawn_local<F>(future: F) -> Self::JoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        <F as Future>::Output: 'static,
+    {
         Runtime::spawn_local(future)
     }
 }

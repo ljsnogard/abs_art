@@ -42,14 +42,14 @@ type FullRt = Runtime<FULL>;
 /// 不需要 LocalSet，也不需要额外的 block_on 能力——外层 await 即可。
 async fn everything_except_local() -> i32 {
     // 1) spawn_send：跨线程任务
-    let h = <FullRt as TrSpawnSend<_>>::spawn(async { 10 });
+    let h = <FullRt as TrSpawnSend>::spawn(async { 10 });
     let a = h.await.unwrap();
 
     // 2) delay：时间驱动
     <FullRt as TrDelay>::delay(Duration::from_millis(1)).await;
 
     // 3) spawn_blocking：阻塞池
-    let h = <FullRt as TrSpawnBlocking<_, i32>>::spawn_blocking(|| 20);
+    let h = <FullRt as TrSpawnBlocking>::spawn_blocking(|| 20);
     let b = h.await.unwrap();
 
     a + b // 10 + 20
@@ -61,7 +61,7 @@ async fn everything_except_local() -> i32 {
 async fn local_part() -> i32 {
     let rc = std::rc::Rc::new(12i32);
     let rc2 = rc.clone();
-    let h = <FullRt as TrSpawnLocal<_>>::spawn_local(async move { *rc2 });
+    let h = <FullRt as TrSpawnLocal>::spawn_local(async move { *rc2 });
     h.await.unwrap()
 }
 
@@ -77,7 +77,7 @@ fn main() {
         .build()
         .unwrap();
     let out = rt.block_on(async {
-        <FullRt as TrBlockOn<_>>::block_on(everything_except_local())
+        <FullRt as TrBlockOn>::block_on(everything_except_local())
     });
     assert_eq!(out, 30, "spawn(10) + spawn_blocking(20)");
 

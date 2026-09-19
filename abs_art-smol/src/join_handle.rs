@@ -54,8 +54,8 @@ where
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn about() -> abs_art::Runtime {
-        abs_art::Runtime::Smol
+    fn about() -> abs_art::RuntimeTag {
+        abs_art::RuntimeTag::Smol
     }
 }
 

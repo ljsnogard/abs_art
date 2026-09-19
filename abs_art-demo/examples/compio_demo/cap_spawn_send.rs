@@ -58,9 +58,9 @@ where
 /// compio 的任务在同一个线程本地运行时上交错执行；返回值通过抽象的
 /// `join_abstract` 取回，调用点没有任何后端类型泄漏。
 async fn concurrent_sum(x: i32) -> i32 {
-    let h1 = <SendRt as TrSpawnSend<_>>::spawn(async move { x });
-    let h2 = <SendRt as TrSpawnSend<_>>::spawn(async move { x * 2 });
-    let h3 = <SendRt as TrSpawnSend<_>>::spawn(async move { x * 3 });
+    let h1 = <SendRt as TrSpawnSend>::spawn(async move { x });
+    let h2 = <SendRt as TrSpawnSend>::spawn(async move { x * 2 });
+    let h3 = <SendRt as TrSpawnSend>::spawn(async move { x * 3 });
     let a = join_abstract(h1).await.unwrap();
     let b = join_abstract(h2).await.unwrap();
     let c = join_abstract(h3).await.unwrap();
@@ -72,7 +72,7 @@ async fn panic_propagates() -> bool {
     async fn boom() -> i32 {
         panic!("任务爆炸");
     }
-    let h = <SendRt as TrSpawnSend<_>>::spawn(boom());
+    let h = <SendRt as TrSpawnSend>::spawn(boom());
     // compio 的 JoinError::Panicked 同样会被捕获为 Err，而不是炸掉进程
     join_abstract(h).await.is_err()
 }
@@ -82,8 +82,8 @@ fn main() {
 
     let (sum, panicked) = rt.block_on(async {
         // 外层 compio 上下文内再 block_on 聚合 future（块内执行 spawn 等操作）
-        let sum = <SendRt as TrBlockOn<_>>::block_on(concurrent_sum(7));
-        let panicked = <SendRt as TrBlockOn<_>>::block_on(panic_propagates());
+        let sum = <SendRt as TrBlockOn>::block_on(concurrent_sum(7));
+        let panicked = <SendRt as TrBlockOn>::block_on(panic_propagates());
         (sum, panicked)
     });
 

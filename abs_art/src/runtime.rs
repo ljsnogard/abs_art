@@ -12,7 +12,7 @@ use core::future::Future;
 ///
 /// [`abs_art_tokio`]: https://docs.rs/abs_art-tokio
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Runtime {
+pub enum RuntimeTag {
     /// compio 运行时。
     Compio,
     /// smol 运行时。
@@ -24,7 +24,7 @@ pub enum Runtime {
 pub trait TrAsyncRuntime {
     type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
 
-    fn about() -> Runtime;
+    fn about() -> RuntimeTag;
 }
 
 pub trait TrJoinHandle<T>
@@ -61,53 +61,139 @@ where
 
 /// 运行时可以把任务投递到全局（跨线程）工作窃取队列。
 ///
-/// `H` 是返回的任务句柄类型，由组合 crate 给出（例如 `abs_art-tokio`
-/// 中的 [`JoinHandle`]）。把句柄类型做成泛型参数，是为了让本基础 crate
-/// 不持有任何与具体运行时相关的类型。
+/// 被 spawn 的 future 类型 `F` 是 [`spawn`](Self::spawn) 的**方法级泛型参数**，
+/// 不出现在 trait 上。于是一个运行时类型只需实现本 trait 一次，就能 spawn
+/// 任意多种不同的 future（包括调用点无法命名的 `async {}` 块），库侧写一个
+/// `Rt: TrSpawnSend` 约束即可覆盖全部任务类型。
 ///
-/// [`JoinHandle`]: https://docs.rs/abs_art-tokio
-pub trait TrSpawnSend<F>
-where
-    F: Future + Send + 'static,
-    <F as Future>::Output: Send + 'static,
-{
+/// 返回的句柄经 GAT [`JoinHandle<T>`](Self::JoinHandle) 按 future 的**输出类型**
+/// `T` 参数化，因此本基础 crate 不持有任何与具体运行时相关的类型。
+///
+/// # Examples
+///
+/// 泛型库侧（不依赖任何后端，`Rt` 由最终二进制实例化）：
+///
+/// ```rust
+/// use abs_art::TrSpawnSend;
+///
+/// async fn run_two<Rt>() -> u32
+/// where
+///     Rt: TrSpawnSend,
+/// {
+///     // 同一个约束即可 spawn 两种不同的（其中一个还无法命名的）future
+///     let a = Rt::spawn(async { 1u32 }).await.unwrap();
+///     let b = Rt::spawn(async move { a + 1 }).await.unwrap();
+///     b
+/// }
+/// ```
+///
+/// # Panics
+///
+/// 是否 panic 由具体后端的实现决定，本 trait 不作承诺。
+pub trait TrSpawnSend {
+    /// 任务句柄类型，由组合 crate 给出（例如 `abs_art-tokio` 中的
+    /// [`JoinHandle`]），按 future 的输出类型 `T` 参数化。
+    ///
+    /// [`JoinHandle`]: https://docs.rs/abs_art-tokio
     type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
 
     /// 把 `future` 投递到全局工作队列，返回句柄 `H`。
-    fn spawn(future: F) -> Self::JoinHandle<<F as Future>::Output>;
+    ///
+    /// # Errors
+    ///
+    /// 句柄只有在被 `await` 时才可能产出错误（任务 panic 等），投递本身
+    /// 返回句柄而不返回 `Result`。
+    fn spawn<F>(future: F) -> Self::JoinHandle<<F as Future>::Output>
+    where
+        F: Future + Send + 'static,
+        <F as Future>::Output: Send + 'static;
 }
 
 /// 运行时可以把任务投递到线程本地工作队列。
-pub trait TrSpawnLocal<F>
-where
-    F: Future + 'static,
-    <F as Future>::Output: 'static,
-{
+///
+/// 与 [`TrSpawnSend`] 的形状相同：future 类型 `F` 是 [`spawn_local`](Self::spawn_local)
+/// 的方法级泛型参数。区别只在约束——本 trait 不要求 `F: Send`，因此可以承载
+/// 捕获 `Rc` 等 `!Send` 数据的任务。
+///
+/// # Examples
+///
+/// ```rust
+/// use abs_art::TrSpawnLocal;
+///
+/// async fn run_local<Rt>() -> u32
+/// where
+///     Rt: TrSpawnLocal,
+/// {
+///     let rc = std::rc::Rc::new(1u32);
+///     Rt::spawn_local(async move { *rc }).await.unwrap()
+/// }
+/// ```
+pub trait TrSpawnLocal {
+    /// 任务句柄类型，由组合 crate 给出，按 future 的输出类型 `T` 参数化。
     type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
 
     /// 把 `future` 投递到线程本地工作队列，返回句柄 `H`。
-    fn spawn_local(future: F) -> Self::JoinHandle<<F as Future>::Output>;
+    fn spawn_local<F>(future: F) -> Self::JoinHandle<<F as Future>::Output>
+    where
+        F: Future + 'static,
+        <F as Future>::Output: 'static;
 }
 
 /// 运行时可以把阻塞函数投递到阻塞线程池。
-pub trait TrSpawnBlocking<F, T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    type JoinHandle: TrJoinHandle<T> where T: 'static;
+///
+/// 方法级泛型有**两个**：闭包类型 `F` 与闭包输出类型 `T`；由于 `F` 不进 trait，
+/// 句柄 GAT [`JoinHandle<T>`](Self::JoinHandle) 改为按输出类型 `T` 参数化
+/// （v0.2 的写法把 `T` 放在 trait 参数上、句柄关联类型不具参，无法在 `F`
+/// 移出 trait 后继续表达）。
+///
+/// # Examples
+///
+/// ```rust
+/// use abs_art::TrSpawnBlocking;
+///
+/// async fn compute<Rt>() -> u32
+/// where
+///     Rt: TrSpawnBlocking,
+/// {
+///     Rt::spawn_blocking(|| 6 * 7).await.unwrap()
+/// }
+/// ```
+pub trait TrSpawnBlocking {
+    /// 任务句柄类型，由组合 crate 给出，按阻塞函数输出类型 `T` 参数化。
+    type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
 
     /// 把阻塞函数 `f` 投递到阻塞线程池，返回句柄 `H`。
-    fn spawn_blocking(f: F) -> Self::JoinHandle;
+    fn spawn_blocking<F, T>(f: F) -> Self::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static;
 }
 
 /// 让当前线程阻塞等待一个异步任务完成，同时不影响运行时的调度。
-pub trait TrBlockOn<F>
-where
-    F: Future,
-{
+///
+/// 被等待的 future 类型 `F` 是 [`block_on`](Self::block_on) 的方法级泛型参数。
+/// 由于 `F` 不进 trait，`F` 不需要 `'static`——可以借用当前栈帧上的数据
+/// （见 `abs_art-demo` 的 `cap_block_on` 示例）。
+///
+/// # Examples
+///
+/// ```rust
+/// use abs_art::TrBlockOn;
+///
+/// fn len_of_stack_string<Rt>() -> usize
+/// where
+///     Rt: TrBlockOn,
+/// {
+///     let s = String::from("hello");
+///     // 借用局部 `s` 的 future 不是 'static，仍然可以 block_on
+///     Rt::block_on(async { s.len() })
+/// }
+/// ```
+pub trait TrBlockOn {
     /// 阻塞当前线程，等待 `f` 完成并返回其结果。
-    fn block_on(f: F) -> F::Output;
+    fn block_on<F>(f: F) -> F::Output
+    where
+        F: Future;
 }
 
 /// 暂停当前执行上下文一段时间。

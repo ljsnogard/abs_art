@@ -20,8 +20,8 @@ pub struct JoinHandle<T> {
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn about() -> abs_art::Runtime {
-        abs_art::Runtime::Compio
+    fn about() -> abs_art::RuntimeTag {
+        abs_art::RuntimeTag::Compio
     }
 }
 

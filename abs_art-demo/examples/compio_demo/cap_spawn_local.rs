@@ -48,12 +48,12 @@ async fn share_rc() -> i32 {
     let shared = Rc::new(RefCell::new(vec![1i32, 2, 3]));
 
     let s1 = shared.clone();
-    let h1 = <LocalRt as TrSpawnLocal<_>>::spawn_local(async move {
+    let h1 = <LocalRt as TrSpawnLocal>::spawn_local(async move {
         s1.borrow_mut().push(4);
     });
 
     let s2 = shared.clone();
-    let h2 = <LocalRt as TrSpawnLocal<_>>::spawn_local(async move {
+    let h2 = <LocalRt as TrSpawnLocal>::spawn_local(async move {
         s2.borrow_mut().push(5);
     });
 

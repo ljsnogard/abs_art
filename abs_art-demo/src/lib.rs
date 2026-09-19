@@ -95,8 +95,8 @@ pub type BlockOnRt = Runtime<{ BLOCK_ON }>;
 /// 该函数**没有任何泛型参数**——运行时能力通过 [`CapRt`] 的类型参数静态声明，
 /// 编译期完成校验，运行期零开销。
 pub fn double_via_runtime(x: i32) -> i32 {
-    <CapRt as TrBlockOn<_>>::block_on(async move {
-        let handle = <CapRt as TrSpawnSend<_>>::spawn(async move { x * 2 });
+    <CapRt as TrBlockOn>::block_on(async move {
+        let handle = <CapRt as TrSpawnSend>::spawn(async move { x * 2 });
         handle.await.unwrap()
     })
 }
@@ -112,7 +112,29 @@ pub fn double_via_runtime(x: i32) -> i32 {
 /// compio 需要 `with_current`），由集成方保证。
 pub fn sum_stack_data() -> usize {
     let data = [1usize, 2, 3, 4];
-    <BlockOnRt as TrBlockOn<_>>::block_on(async { data.iter().sum() })
+    <BlockOnRt as TrBlockOn>::block_on(async { data.iter().sum() })
+}
+
+/// 纯泛型业务函数：只写**一个** `Rt: TrSpawnSend` 约束，就 spawn 两种不同
+/// 的 future（其中第二个是无法命名的 `async {}` 块），再 `block_on` 等待结果。
+///
+/// 这是 v0.3 把自由参数 `F` 从 trait 泛型列表移到 [`TrSpawnSend::spawn`]
+/// 方法级泛型后新获得的能力：v0.2 需要为每个 future 各写一条约束
+/// （`Rt: TrSpawnSend<F1> + TrSpawnSend<F2>`），而函数内部 `async` 块的类型
+/// 外部**无法命名**，`F2` 那条约束根本写不出来。本函数不感知任何后端，
+/// `Rt` 由调用方（集成方）实例化。
+pub fn generic_two_tasks<Rt>(x: i32) -> i32
+where
+    Rt: TrSpawnSend + TrBlockOn,
+{
+    <Rt as TrBlockOn>::block_on(async move {
+        let a = <Rt as TrSpawnSend>::spawn(async move { x }).await.unwrap();
+        // 第二个 future 是匿名 async 块：单一 `Rt: TrSpawnSend` 约束即可覆盖
+        let b = <Rt as TrSpawnSend>::spawn(async move { a * 2 })
+            .await
+            .unwrap();
+        a + b
+    })
 }
 
 /// 目的：验证业务函数在真实后端上运行正常。
@@ -121,7 +143,8 @@ pub fn sum_stack_data() -> usize {
 /// 对应运行时，在运行时上下文内调用 [`double_via_runtime`] 与
 /// [`sum_stack_data`]。
 ///
-/// 通过依据：`double_via_runtime(21) == 42`；`sum_stack_data() == 10`。
+/// 通过依据：`double_via_runtime(21) == 42`；`sum_stack_data() == 10`；
+/// `generic_two_tasks::<CapRt>(21) == 63`。
 #[cfg(all(test, feature = "demo-tokio"))]
 mod tests_tokio {
     use super::*;
@@ -148,6 +171,25 @@ mod tests_tokio {
         let out = rt.block_on(async { sum_stack_data() });
         assert_eq!(out, 10);
     }
+
+    /// 目的：验证 v0.3 的单一 `Rt: TrSpawnSend` 约束能覆盖多个 future
+    /// （含无法命名的 `async` 块）——即把 `F` 移到方法级泛型后真正拿到的收益。
+    ///
+    /// 实施策略：在 tokio 多线程运行时上下文内调用泛型函数
+    /// [`generic_two_tasks`]，用只声明 `BLOCK_ON | SPAWN_SEND` 的 [`CapRt`]
+    /// 实例化 `Rt`；该函数内部仅凭一条 `Rt: TrSpawnSend` 约束 spawn 两个不同
+    /// 的 future（第二个是匿名 `async` 块）。
+    ///
+    /// 通过依据：返回 `21 + 21 * 2 == 63`；若 trait 退回 v0.2 的
+    /// `TrSpawnSend<F>` 形状（无法为匿名 future 命名约束），本测试将无法编译。
+    #[test]
+    fn generic_bound_covers_multiple_futures() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .build()
+            .unwrap();
+        let out = rt.block_on(async { generic_two_tasks::<CapRt>(21) });
+        assert_eq!(out, 63);
+    }
 }
 
 /// 目的：与 `tests_tokio` 相同，但运行在 compio 后端上。
@@ -155,7 +197,8 @@ mod tests_tokio {
 /// 实施策略：创建 compio 运行时（`Runtime::new()` 默认开启全部 driver），
 /// 在 `rt.block_on` 上下文内调用业务函数。
 ///
-/// 通过依据：`double_via_runtime(21) == 42`；`sum_stack_data() == 10`。
+/// 通过依据：`double_via_runtime(21) == 42`；`sum_stack_data() == 10`；
+/// `generic_two_tasks::<CapRt>(21) == 63`。
 #[cfg(all(test, feature = "demo-compio"))]
 mod tests_compio {
     use super::*;
@@ -172,6 +215,21 @@ mod tests_compio {
         let rt = compio::runtime::Runtime::new().unwrap();
         let out = rt.block_on(async { sum_stack_data() });
         assert_eq!(out, 10);
+    }
+
+    /// 目的：与 tokio 侧同名测试相同，验证单一约束覆盖多个 future 的收益在
+    /// compio 后端同样成立。
+    ///
+    /// 实施策略：在 compio 运行时上下文内调用 [`generic_two_tasks`]，用
+    /// 只声明 `BLOCK_ON | SPAWN_SEND` 的 [`CapRt`] 实例化 `Rt`。
+    ///
+    /// 通过依据：返回 `21 + 21 * 2 == 63` 且无 panic；编译通过本身即证明
+    /// 一条 `Rt: TrSpawnSend` 约束可覆盖函数内部两种不同的 future。
+    #[test]
+    fn generic_bound_covers_multiple_futures() {
+        let rt = compio::runtime::Runtime::new().unwrap();
+        let out = rt.block_on(async { generic_two_tasks::<CapRt>(21) });
+        assert_eq!(out, 63);
     }
 }
 
@@ -190,7 +248,7 @@ pub mod strict_mode_check {
     /// ```compile_fail
     /// use abs_art_demo::{BLOCK_ON, Runtime, TrSpawnSend};
     ///
-    /// let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend<_>>::spawn(async { 1 });
+    /// let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend>::spawn(async { 1 });
     /// ```
     pub mod no_spawn_without_send_cap {}
 
@@ -199,7 +257,7 @@ pub mod strict_mode_check {
     /// ```compile_fail
     /// use abs_art_demo::{Runtime, TrBlockOn};
     ///
-    /// let _ = <Runtime<0> as TrBlockOn<_>>::block_on(async { 1 });
+    /// let _ = <Runtime<0> as TrBlockOn>::block_on(async { 1 });
     /// ```
     pub mod zero_caps_no_block_on {}
 
@@ -214,7 +272,7 @@ pub mod strict_mode_check {
     /// use abs_art_demo::{BLOCK_ON, SPAWN_SEND, Runtime, TrSpawnSend};
     ///
     /// let rc = Rc::new(1); // !Send：被 async move 捕获后，future 不是 Send
-    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnSend<_>>::spawn(async move {
+    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnSend>::spawn(async move {
     ///     let _x = rc;
     ///     1
     /// });
@@ -231,7 +289,7 @@ pub mod strict_mode_check {
     /// use abs_art_demo::{BLOCK_ON, SPAWN_SEND, Runtime, TrSpawnSend};
     ///
     /// let data = vec![1, 2, 3];
-    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnSend<_>>::spawn(async {
+    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnSend>::spawn(async {
     ///     data.iter().sum::<i32>() // data 是借用，非 'static
     /// });
     /// ```
@@ -243,7 +301,7 @@ pub mod strict_mode_check {
     /// ```compile_fail
     /// use abs_art_demo::{BLOCK_ON, SPAWN_SEND, Runtime, TrSpawnLocal};
     ///
-    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnLocal<_>>::spawn_local(async { 1 });
+    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnLocal>::spawn_local(async { 1 });
     /// ```
     pub mod no_spawn_local_without_local_cap {}
 

@@ -46,10 +46,10 @@ async fn blocking_plus_async() -> (usize, usize) {
     let counter = std::sync::Arc::new(AtomicUsize::new(0));
 
     // 两个重活交给阻塞线程池（后台线程并行执行）
-    let h1 = <BlockingRt as TrSpawnBlocking<_, usize>>::spawn_blocking(move || {
+    let h1 = <BlockingRt as TrSpawnBlocking>::spawn_blocking(move || {
         heavy_compute(10)
     });
-    let h2 = <BlockingRt as TrSpawnBlocking<_, usize>>::spawn_blocking(move || {
+    let h2 = <BlockingRt as TrSpawnBlocking>::spawn_blocking(move || {
         heavy_compute(10)
     });
 
@@ -71,7 +71,7 @@ fn main() {
 
     let (sum, count) = rt.block_on(async {
         // 外层 tokio 上下文内 block_on 聚合 future（块内完成 spawn_blocking）
-        <BlockingRt as TrBlockOn<_>>::block_on(blocking_plus_async())
+        <BlockingRt as TrBlockOn>::block_on(blocking_plus_async())
     });
 
     assert_eq!(sum, 570, "2 * sum(0..10, i^2) = 2 * 285");

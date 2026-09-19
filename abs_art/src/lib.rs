@@ -27,6 +27,6 @@ pub use caps::{
     HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend,
 };
 pub use runtime::{
-    Runtime, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking,
+    RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking,
     TrSpawnLocal, TrSpawnSend,
 };

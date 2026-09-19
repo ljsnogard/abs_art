@@ -9,7 +9,7 @@ impl Runtime<FULL> {
     /// 把 `future` 投递到 tokio 的全局工作队列，返回 [`JoinHandle`]。
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
-        Self: TrSpawnSend<F>,
+        Self: TrSpawnSend,
         F: Future + Send + 'static,
         <F as Future>::Output: Send + 'static,
     {
@@ -17,15 +17,17 @@ impl Runtime<FULL> {
     }
 }
 
-impl<F, const CAPS: usize> TrSpawnSend<F> for Runtime<CAPS>
+impl<const CAPS: usize> TrSpawnSend for Runtime<CAPS>
 where
-    F: Future + Send + 'static,
-    <F as Future>::Output: Send + 'static,
     [(); CAPS]: HasSpawnSend,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn(future: F) -> Self::JoinHandle<F::Output> {
+    fn spawn<F>(future: F) -> Self::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        <F as Future>::Output: Send + 'static,
+    {
         tokio::task::spawn(future).into()
     }
 }

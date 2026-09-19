@@ -15,16 +15,15 @@ impl Runtime<FULL> {
     /// 会 panic。
     pub fn block_on<F>(future: F) -> F::Output
     where
-        Self: TrBlockOn<F>,
+        Self: TrBlockOn,
         F: Future,
     {
-        <Self as TrBlockOn<F>>::block_on(future)
+        <Self as TrBlockOn>::block_on(future)
     }
 }
 
-impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
+impl<const CAPS: usize> TrBlockOn for Runtime<CAPS>
 where
-    F: Future,
     [(); CAPS]: HasBlockOn,
 {
     /// 通过 `CompioRuntime::with_current` 获取当前线程的环境运行时，再调用其
@@ -33,7 +32,10 @@ where
     /// compio 的 `block_on` 在等待期间会循环执行「轮询 future → 驱动 executor
     /// → 轮询驱动」：因此 `future` 处于 pending 时，同运行时内 `spawn` 的其他
     /// 任务仍会被推进，即「不影响运行时调度」。
-    fn block_on(future: F) -> F::Output {
+    fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
         CompioRuntime::with_current(|rt| {
             rt.block_on(future)
         })
@@ -181,7 +183,7 @@ mod tests {
         let rt = CompioRuntime::new().unwrap();
 
         let out = rt.block_on(async {
-            <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(async {
+            <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn>::block_on(async {
                 40 + 2
             })
         });

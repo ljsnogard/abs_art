@@ -8,7 +8,7 @@ impl Runtime<FULL> {
     /// [`JoinHandle`]。
     pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
     where
-        Self: TrSpawnBlocking<F, T>,
+        Self: TrSpawnBlocking,
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
@@ -16,15 +16,17 @@ impl Runtime<FULL> {
     }
 }
 
-impl<F, T, const CAPS: usize> TrSpawnBlocking<F, T> for Runtime<CAPS>
+impl<const CAPS: usize> TrSpawnBlocking for Runtime<CAPS>
 where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
     [(); CAPS]: HasSpawnBlocking,
 {
-    type JoinHandle = JoinHandle<T> where F: 'static;
+    type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn_blocking(f: F) -> JoinHandle<T> {
+    fn spawn_blocking<F, T>(f: F) -> Self::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         smol::unblock(f).into()
     }
 }

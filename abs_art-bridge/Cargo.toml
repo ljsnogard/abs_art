@@ -10,15 +10,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-abs_art        = { path = "../abs_art", version = "0.2.2" }
-abs_art-tokio  = { path = "../abs_art-tokio", optional = true, version = "0.2.2" }
-abs_art-compio = { path = "../abs_art-compio", optional = true, version = "0.2.2" }
-abs_art-smol   = { path = "../abs_art-smol", optional = true, version = "0.2.2" }
+abs_art        = { path = "../abs_art", version = "0.3.0" }
+abs_art-tokio  = { path = "../abs_art-tokio", optional = true, version = "0.3.0" }
+abs_art-compio = { path = "../abs_art-compio", optional = true, version = "0.3.0" }
+abs_art-smol   = { path = "../abs_art-smol", optional = true, version = "0.3.0" }
 
 [features]
 # 通过 Cargo.toml 选择后端（必须且只能启用一个）
-backend-tokio = ["dep:abs_art-tokio"]
 backend-compio = ["dep:abs_art-compio"]
+backend-tokio = ["dep:abs_art-tokio"]
 backend-smol = ["dep:abs_art-smol"]
 
-default = ["backend-tokio"]
+default = ["backend-compio"]

@@ -11,16 +11,15 @@ impl Runtime<FULL> {
     /// smol 的 `block_on` 不依赖任何「环境运行时」，可以在任何线程直接使用。
     pub fn block_on<F>(future: F) -> F::Output
     where
-        Self: TrBlockOn<F>,
+        Self: TrBlockOn,
         F: Future,
     {
-        <Self as TrBlockOn<F>>::block_on(future)
+        <Self as TrBlockOn>::block_on(future)
     }
 }
 
-impl<F, const CAPS: usize> TrBlockOn<F> for Runtime<CAPS>
+impl<const CAPS: usize> TrBlockOn for Runtime<CAPS>
 where
-    F: Future,
     [(); CAPS]: HasBlockOn,
 {
     /// 直接调用 `smol::block_on`（其底层是 `async_io::block_on`）：在当前
@@ -29,7 +28,10 @@ where
     /// smol 没有「环境运行时句柄」的概念：`smol::spawn` 提交的任务由独立的
     /// 后台线程（全局执行器）驱动，因此本函数既不需要预先进入任何运行时上下文，
     /// 也不会阻塞全局执行器的调度。
-    fn block_on(future: F) -> F::Output {
+    fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
         smol::block_on(future)
     }
 }
@@ -111,7 +113,7 @@ mod tests {
     fn tagged_runtime_implements_block_on() {
         use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
 
-        let out = <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(
+        let out = <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn>::block_on(
             async { 40 + 2 },
         );
         assert_eq!(out, 42);

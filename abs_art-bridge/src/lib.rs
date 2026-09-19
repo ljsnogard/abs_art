@@ -31,18 +31,18 @@
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Runtime as RuntimeTag,
+    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
     TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal,
     TrSpawnSend,
 };
 
 /// 当前后端提供的 [`Runtime`] 类型（由 `backend-*` feature 决定）。
-#[cfg(feature = "backend-tokio")]
-pub use abs_art_tokio::Runtime;
-
-/// 当前后端提供的 [`Runtime`] 类型（由 `backend-*` feature 决定）。
 #[cfg(feature = "backend-compio")]
 pub use abs_art_compio::Runtime;
+
+/// 当前后端提供的 [`Runtime`] 类型（由 `backend-*` feature 决定）。
+#[cfg(feature = "backend-tokio")]
+pub use abs_art_tokio::Runtime;
 
 /// 当前后端提供的 [`Runtime`] 类型（由 `backend-*` feature 决定）。
 #[cfg(feature = "backend-smol")]
@@ -68,7 +68,7 @@ compile_error!("abs_art-bridge：必须启用一个 backend feature（backend-to
 compile_error!("abs_art-bridge：backend feature 只能启用一个");
 
 #[cfg(all(test, feature = "backend-tokio"))]
-mod tests_tokio {
+mod tests_tokio_ {
     //! tokio 后端下的桥接烟雾测试（`cargo test --workspace` 时运行）。
 
     use super::*;

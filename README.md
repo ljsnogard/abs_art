@@ -17,8 +17,15 @@ smol::spawn(async { ... });                 // 选 smol → 用户想换都不�
 
 ```rust
 pub async fn process<R>(...) -> ...          // 每个函数都要带一个 R 参数
-where R: TrSpawnSend<...> + ...             // 泛型参数一路穿透所有代码
+where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有代码
 ```
+
+> v0.3 起，`TrSpawnSend` / `TrSpawnLocal` / `TrSpawnBlocking` / `TrBlockOn`
+> 不再带 `F` 类型参数：被 spawn 的 future 类型是各自动**方法级泛型参数**。
+> 于是一个 `R: TrSpawnSend` 约束就能覆盖该运行时上**所有**任务类型
+> （包括调用点无法命名的 `async {}` 块），不必为每个 future 写一个
+> `TrSpawnSend<F>`。上面「泛型穿透」的痛点依然存在，但约束数量不再随
+> 任务种类增长。
 
 你的 API 被"运行时类型"污染，业务逻辑里全是与业务无关的泛型噪音。
 
@@ -48,8 +55,8 @@ pub type CapRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;
 
 /// 业务函数：spawn 一个任务计算 x * 2，再 block_on 等待结果
 pub fn double_via_runtime(x: i32) -> i32 {
-    <CapRt as TrBlockOn<_>>::block_on(async move {
-        let handle = <CapRt as TrSpawnSend<_>>::spawn(async move { x * 2 });
+    <CapRt as TrBlockOn>::block_on(async move {
+        let handle = <CapRt as TrSpawnSend>::spawn(async move { x * 2 });
         handle.await.unwrap()
     })
 }
@@ -113,7 +120,7 @@ abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后�
 ### 为什么是零开销
 
 1. **能力检查发生在编译期**：`CAPS` 是 const 位掩码，`[(); CAPS]: HasBlockOn` 这类类型级标记在编译期被求解；`Runtime` 是零大小类型（ZST），`current()` 是 `const fn`——运行期没有任何能力相关的数据结构。
-2. **调用是静态分发**：`<CapRt as TrBlockOn<_>>::block_on(...)` 在编译期被单态化为直接调用 tokio/compio/smol 的 API。**没有 vtable、没有 `Box`、没有 downcast、没有动态分发**——最终机器码与手写后端调用等价。
+2. **调用是静态分发**：`<CapRt as TrBlockOn>::block_on(...)` 在编译期被单态化为直接调用 tokio/compio/smol 的 API。**没有 vtable、没有 `Box`、没有 downcast、没有动态分发**——最终机器码与手写后端调用等价。
 3. **后端 crate 的五个功能（`block_on` / `delay` / `spawn_send` / `spawn_local` / `spawn_blocking`）是 feature 开关**：按需编译，不用的代码不进产物。
 
 对比其它方案：运行时注入（log 风格）需要类型擦除 + 装箱 + downcast，每次调用都有开销；泛型穿透需要把 `R` 参数写进每个函数签名。abs_art 用"能力声明"把两者都省掉了——零开销，且签名干净。

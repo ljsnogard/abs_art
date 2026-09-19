@@ -35,8 +35,8 @@
 //! // 只声明 block_on + spawn_local 两种能力
 //! let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
 //! let _ = rt;
-//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn<_>>::block_on(async { 1 });
-//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrSpawnLocal<_>>::spawn_local(async { 2 });
+//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn>::block_on(async { 1 });
+//! // <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrSpawnLocal>::spawn_local(async { 2 });
 //! ```
 //!
 //! ```compile_fail
@@ -44,7 +44,7 @@
 //! use abs_art_tokio::Runtime;
 //!
 //! // 只声明了 block_on 能力，spawn（spawn_send）不可用 → 编译错误（Tag 严格模式）
-//! let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend<_>>::spawn(async { 1 });
+//! let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend>::spawn(async { 1 });
 //! ```
 
 #![no_std]
@@ -53,10 +53,9 @@
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, TrAsyncRuntime,
-    TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal, TrSpawnSend,
+    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
+    TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal, TrSpawnSend,
 };
-pub use abs_art::Runtime as RuntimeTag;
 
 /// tokio 组合运行时标记类型。
 ///

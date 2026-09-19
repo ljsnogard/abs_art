@@ -7,7 +7,7 @@ impl Runtime<FULL> {
     /// 把阻塞函数 `f` 投递到 tokio 的阻塞线程池，返回 [`JoinHandle`]。
     pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
     where
-        Self: TrSpawnBlocking<F, T>,
+        Self: TrSpawnBlocking,
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
@@ -15,15 +15,17 @@ impl Runtime<FULL> {
     }
 }
 
-impl<F, T, const CAPS: usize> TrSpawnBlocking<F, T> for Runtime<CAPS>
+impl<const CAPS: usize> TrSpawnBlocking for Runtime<CAPS>
 where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
     [(); CAPS]: HasSpawnBlocking,
 {
-    type JoinHandle = JoinHandle<T> where T: 'static;
+    type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn_blocking(f: F) -> Self::JoinHandle {
+    fn spawn_blocking<F, T>(f: F) -> Self::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         tokio::task::spawn_blocking(f).into()
     }
 }

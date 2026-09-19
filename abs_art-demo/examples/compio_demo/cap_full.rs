@@ -47,21 +47,21 @@ type FullRt = Runtime<FULL>;
 /// 能力（`block_on` 在 main 里作为外层驱动）。
 async fn everything() -> i32 {
     // 1) spawn_send：投递到当前运行时工作队列
-    let h = <FullRt as TrSpawnSend<_>>::spawn(async { 10 });
+    let h = <FullRt as TrSpawnSend>::spawn(async { 10 });
     let a = h.await.unwrap();
 
     // 2) delay：时间驱动
     <FullRt as TrDelay>::delay(Duration::from_millis(1)).await;
 
     // 3) spawn_blocking：阻塞线程
-    let h = <FullRt as TrSpawnBlocking<_, i32>>::spawn_blocking(|| 20);
+    let h = <FullRt as TrSpawnBlocking>::spawn_blocking(|| 20);
     let b = h.await.unwrap();
 
     // 4) spawn_local：!Send 的 Rc 任务（compio 无需 LocalSet，直接可用）
     let c = {
         let rc = std::rc::Rc::new(12i32);
         let rc2 = rc.clone();
-        let h = <FullRt as TrSpawnLocal<_>>::spawn_local(async move { *rc2 });
+        let h = <FullRt as TrSpawnLocal>::spawn_local(async move { *rc2 });
         h.await.unwrap()
     };
 
@@ -77,7 +77,7 @@ fn main() {
     let rt = compio::runtime::Runtime::new().unwrap();
     let out = rt.block_on(async {
         // 外层 compio 上下文内 block_on 聚合 future（块内完成全部五种能力）
-        <FullRt as TrBlockOn<_>>::block_on(everything())
+        <FullRt as TrBlockOn>::block_on(everything())
     });
 
     assert_eq!(out, 42, "spawn(10) + spawn_blocking(20) + Rc(12)");

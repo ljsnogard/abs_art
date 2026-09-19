@@ -47,7 +47,7 @@ type BlockOnRt = Runtime<{ BLOCK_ON }>;
 fn sum_stack_data() -> usize {
     let data = [1usize, 2, 3, 4];
     // 借用 data 的 future：非 'static，直接在 block_on 里消费掉
-    <BlockOnRt as TrBlockOn<_>>::block_on(async { data.iter().sum() })
+    <BlockOnRt as TrBlockOn>::block_on(async { data.iter().sum() })
 }
 
 /// 业务函数 B：`block_on` 的 future **返回一个借用引用**（Output 非 `'static`）。
@@ -58,14 +58,14 @@ fn sum_stack_data() -> usize {
 fn slice_then_sum() -> i32 {
     let data = [1i32, 2, 3];
     // Output = &[i32]，生命周期与 data 绑定；block_on 返回后 data 仍存活
-    let slice = <BlockOnRt as TrBlockOn<_>>::block_on(async { data.as_slice() });
+    let slice = <BlockOnRt as TrBlockOn>::block_on(async { data.as_slice() });
     slice.iter().sum::<i32>()
 }
 
 /// 业务函数 C：`block_on` 一个借用局部 `String` 的 future（方法调用即借用）。
 fn str_len() -> usize {
     let s = String::from("hello");
-    <BlockOnRt as TrBlockOn<_>>::block_on(async { s.len() })
+    <BlockOnRt as TrBlockOn>::block_on(async { s.len() })
 }
 
 fn main() {
