@@ -108,6 +108,12 @@ abs_art-bridge     桥接：backend-tokio / backend-compio / backend-smol 三选
 abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后端）
                     examples/ 下按后端分组（tokio_demo / compio_demo）的
                     每种 cap 一个 smoke test（features：demo-tokio / demo-compio）
+
+abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = false）
+                    同一份测试体（泛型于 Rt: TrSpawnLocal）分别跑在三个真实
+                    运行时上，输出 3 后端 × 3 用例的对比矩阵。
+                    测试体不走 bridge——bridge 的 backend-* 互斥，装不下
+                    「三个后端同时对比」
 ```
 
 依赖关系（业务库只碰 bridge）：
@@ -143,7 +149,27 @@ abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后�
 cargo test --workspace        # 全部 crate 的测试
 cargo run -p abs_art-demo     # 运行演示（业务库 + tokio 后端）
 just demo                     # 跑 abs_art-demo 两组 cap smoke tests（tokio + compio）
+just smoke                    # 跑跨后端 spawn_local 行为契约矩阵（见下）
 ```
+
+### 跨后端 `spawn_local` 行为契约（`abs_art-smoke`）
+
+`just smoke` 用**同一份**测试体在 tokio / compio / smol 上各跑三个用例，量出
+`spawn_local` 的实际行为：
+
+| 用例 | tokio | compio | smol |
+|---|---|---|---|
+| A 句柄驱动（spawn 后 await `JoinHandle`） | ✅ | ✅ | ✅ |
+| B 运行时驱动（宿主**不 poll 句柄**） | ✅ | ✅ | ❌ 宿主永久阻塞 |
+| C `detach()` 后循环继续被调度 | ✅ | ✅ | ❌ 任务被取消 |
+
+**smol 的 B、C 两格目前是预期失败**：`abs_art-smol` 现在每次 `spawn_local` 都新建
+一个 `LocalExecutor` 并把它绑在 `JoinHandle` 上，句柄一旦被 poll 不到或 `detach()`
+掉，本地任务就再也推不动。这两格是后续「让 `spawn_local` 在三个后端上行为一致」
+这项改造的验收标准，调研结论与候选方案见
+[`dev-notes/spawn_local-20261002-1247.md`](dev-notes/spawn_local-20261002-1247.md)。
+
+（因此 `cargo test --workspace` 当前也会带上这 2 条失败——这是刻意的，不是回归。）
 
 `abs_art-demo` 的 smoke tests 按后端分组（`examples/tokio_demo/` 与
 `examples/compio_demo/`，每种 cap 组合一个 example）：

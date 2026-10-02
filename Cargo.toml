@@ -6,6 +6,7 @@ members = [
     "abs_art-smol",
     "abs_art-bridge",
     "abs_art-demo",
+    "abs_art-smoke",
 ]
 resolver = "3"
 
@@ -26,6 +27,8 @@ abs_art-tokio = { path = "abs_art-tokio" }
 abs_art-compio = { path = "abs_art-compio" }
 abs_art-smol = { path = "abs_art-smol" }
 abs_art-bridge = { path = "abs_art-bridge" }
+# 与运行时无关的消息通道：abs_art-smoke 的循环任务用例使用
+async-channel = { version = "2" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 compio = { version = "0.19.*", features = ["time"] }
 smol = { version = "2" }

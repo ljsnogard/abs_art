@@ -1,0 +1,31 @@
+[package]
+name = "abs_art-smoke"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+# 本 crate 只做一件事：把**同一份**测试体分别放到 tokio / compio / smol 三个真实
+# 运行时上跑，测出 `spawn_local` 行为是否一致。因此三个后端 crate 同时是依赖，
+# 且**不经过** `abs_art-bridge`——bridge 的 `backend-*` feature 互斥，一次构建
+# 只能启用一个，装不下「三个后端同时对比」这个需求。
+[dependencies]
+# 测试体（src/probe.rs）只依赖这两项：抽象 trait + 与运行时无关的消息通道
+abs_art = { path = "../abs_art", version = "0.3.0" }
+async-channel.workspace = true
+
+# 三个后端 crate 与三个运行时本体只出现在 tests/ 里（用于创建运行时、驱动本地
+# 队列），因此放 dev-dependencies，避免 lib 目标报 `unused_dependencies`。
+[dev-dependencies]
+abs_art-tokio = { path = "../abs_art-tokio", version = "0.3.0" }
+abs_art-compio = { path = "../abs_art-compio", version = "0.3.0" }
+abs_art-smol = { path = "../abs_art-smol", version = "0.3.0" }
+
+tokio.workspace = true
+compio.workspace = true
+smol.workspace = true
