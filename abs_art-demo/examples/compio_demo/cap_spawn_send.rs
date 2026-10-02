@@ -31,8 +31,9 @@
 //!   但抽象层的 `TrSpawnSend` 契约要求 `Send`，两个后端一致；
 //! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（对照 `cap_block_on`
 //!   里 `block_on` 可以借用，见 `spawn_requires_static`）；
-//! - `spawn_local`（需要 `SPAWN_LOCAL` 位）→ 编译错误（见
-//!   `no_spawn_local_without_local_cap`）。
+//! - `spawn_local` → 编译错误：`Runtime` 上**根本没有这个方法**（本地投递自
+//!   v0.3 起不由能力位承载，而是由 `LocalScope` 值承载，见
+//!   `no_spawn_local_on_runtime_type`）。
 
 use core::future::Future;
 

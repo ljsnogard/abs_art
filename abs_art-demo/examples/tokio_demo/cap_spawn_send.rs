@@ -25,8 +25,9 @@
 //! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（`F: 'static` 约束，
 //!   对照 `cap_block_on` 里 `block_on` 可以借用——`TrSpawnSend` 没有放松
 //!   `'static`，见 `spawn_requires_static`）；
-//! - `spawn_local`（需要 `SPAWN_LOCAL` 位）→ 编译错误（见
-//!   `no_spawn_local_without_local_cap`）；
+//! - `spawn_local` → 编译错误：`Runtime` 上**根本没有这个方法**（本地投递自
+//!   v0.3 起不由能力位承载，而是由 `LocalScope` 值承载，见
+//!   `no_spawn_local_on_runtime_type`）；
 //! - 句柄抽象只覆盖「等待/取结果」，不提供后端特有操作（如 tokio 的
 //!   `abort` 之外的取消语义）——能力边界之外的东西不在抽象层承诺内。
 

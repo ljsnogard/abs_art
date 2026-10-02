@@ -109,34 +109,99 @@ pub trait TrSpawnSend {
         <F as Future>::Output: Send + 'static;
 }
 
-/// 运行时可以把任务投递到线程本地工作队列。
+/// 值化的「本地作用域」：本地队列的持有者，也是唯一的驱动入口。
 ///
-/// 与 [`TrSpawnSend`] 的形状相同：future 类型 `F` 是 [`spawn_local`](Self::spawn_local)
-/// 的方法级泛型参数。区别只在约束——本 trait 不要求 `F: Send`，因此可以承载
-/// 捕获 `Rc` 等 `!Send` 数据的任务。
+/// # 与能力位 [`SPAWN_LOCAL`](crate::SPAWN_LOCAL) 的分工
+///
+/// 本地投递被拆成两半，**职责不同、不互相替代**：
+///
+/// | | 回答的问题 | 载体 |
+/// | --- | --- | --- |
+/// | 能力位 `SPAWN_LOCAL` | 你**声明**了没有？ | `Runtime<CAPS>` 的类型级标记 |
+/// | 本 trait 的实现值 | 你**拿到**了没有？ | 具体类型的值（各后端的 `LocalScope`） |
+///
+/// 能力位是**写在代码上的声明**：它拦不住真想用的人，但强制他先把这件事写下来，
+/// 于是「某库开始使用本地投递」必然出现在类型别名、diff 与 code review 里。
+/// 实现值则是**事实**：它携带环境前提，拿不到就投不了。
+///
+/// # 为什么调用点由值把关，而不是由位把关
+///
+/// 「投递 `!Send` 任务」除了「运行时支持」之外，还有一条**环境前提**：必须存在
+/// 一个本地队列，并且有人在驱动它。三个后端的实际情况并不一样：
+///
+/// - **tokio**：本地队列归调用方的 `LocalSet` 所有，由 `LocalSet` 的驱动点驱动；
+/// - **smol**：`smol` 2.x 不提供本地队列，必须由使用方自建 `LocalExecutor` 并驱动；
+/// - **compio**：运行时本身就是线程本地的，队列归运行时所有并由它驱动。
+///
+/// 这条前提**表达不进类型参数**——纯类型约束只能证明「你把位写对了」，证明不了
+/// 「此刻真的有一条被驱动的队列」，于是类型对了、调用点错了，要到运行期才暴露。
+/// 把本地队列做成**值**之后，前提变成「拿不到作用域值就没有 `spawn_local` 可调」，
+/// 且三个后端各自如实表达真实需求（compio 的作用域是零大小的，因为它确实不需要
+/// 调用方提供任何东西）。
+///
+/// 集成方取得作用域值的**声明路径**是各后端的
+/// `Runtime::<{ .. | SPAWN_LOCAL }>::local_scope()`：它把上面那半「声明」与这半
+/// 「取得」串起来——想拿到值，就得先写下那位。
+///
+/// # 实现契约
+///
+/// 1. [`spawn_local`](Self::spawn_local) 投递的任务，其推进**不得依赖
+///    `JoinHandle` 被 poll**——只要作用域还活着且处于被驱动状态，任务就应当持续
+///    运行；
+/// 2. [`TrJoinHandle::detach`] 之后任务**继续运行**：本地队列归作用域所有，
+///    不随句柄销毁；
+/// 3. [`run_until`](Self::run_until) / [`block_on`](Self::block_on) 在等待传入
+///    future 期间，必须持续驱动本地队列。
 ///
 /// # Examples
 ///
-/// ```rust
-/// use abs_art::TrSpawnLocal;
+/// 泛型库侧（不依赖任何后端，`S` 由最终二进制实例化）：
 ///
-/// async fn run_local<Rt>() -> u32
+/// ```rust
+/// use abs_art::TrLocalScope;
+///
+/// async fn run_local<S>(scope: &S) -> u32
 /// where
-///     Rt: TrSpawnLocal,
+///     S: TrLocalScope,
 /// {
+///     // 同一个约束即可投递多种（含调用点无法命名的）!Send future
 ///     let rc = std::rc::Rc::new(1u32);
-///     Rt::spawn_local(async move { *rc }).await.unwrap()
+///     scope.spawn_local(async move { *rc }).await.unwrap()
 /// }
 /// ```
-pub trait TrSpawnLocal {
-    /// 任务句柄类型，由组合 crate 给出，按 future 的输出类型 `T` 参数化。
-    type JoinHandle<T>: TrJoinHandle<T> where T: 'static;
+pub trait TrLocalScope {
+    /// 本地任务句柄类型，由组合 crate 给出，按 future 的输出类型 `T` 参数化。
+    type Handle<T>: TrJoinHandle<T> where T: 'static;
 
-    /// 把 `future` 投递到线程本地工作队列，返回句柄 `H`。
-    fn spawn_local<F>(future: F) -> Self::JoinHandle<<F as Future>::Output>
+    /// 把 `future` 投递到本作用域的本地队列，返回句柄。
+    fn spawn_local<F>(&self, future: F) -> Self::Handle<<F as Future>::Output>
     where
         F: Future + 'static,
         <F as Future>::Output: 'static;
+
+    /// 异步驱动入口：驱动本地队列**直到 `future` 完成**。
+    ///
+    /// 返回的 future 需要放在「已处于该后端运行时上下文」的位置 await；
+    /// 对 compio 这类运行时自己驱动队列的后端，它等价于直接 await `future`。
+    fn run_until<F>(&self, future: F) -> impl Future<Output = <F as Future>::Output>
+    where
+        F: Future;
+
+    /// 阻塞驱动入口：阻塞当前线程，驱动本地队列直到 `future` 完成。
+    ///
+    /// 各后端的先决条件与其 [`TrBlockOn`] 实现保持一致：
+    ///
+    /// - **tokio**：需要多线程运行时，且调用点已处于运行时上下文内
+    ///   （实现走 `block_in_place` + `Handle::block_on`）；
+    /// - **compio**：需要已处于 compio 运行时上下文内（`with_current`）；
+    /// - **smol**：无先决条件。
+    ///
+    /// # Panics
+    ///
+    /// 不满足上述先决条件时 panic；具体由各后端实现决定，本 trait 不作统一承诺。
+    fn block_on<F>(&self, future: F) -> <F as Future>::Output
+    where
+        F: Future;
 }
 
 /// 运行时可以把阻塞函数投递到阻塞线程池。

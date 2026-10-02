@@ -5,9 +5,25 @@
 //!
 //! - 每个能力对应一个位（见下面的 `BLOCK_ON` / `DELAY` / ... 常量）；
 //! - `Has*` 标记 trait 为「包含对应位的掩码值」的 `[(); MASK]` 类型实现；
-//! - 组合能力 = 位的按位或，例如 `BLOCK_ON | SPAWN_LOCAL`。
+//! - 组合能力 = 位的按位或，例如 `BLOCK_ON | SPAWN_SEND`。
 //!
 //! 全部在编译期解析，零运行时开销。
+//!
+//! # 能力位的定位：写在代码上的「声明」，不是能力剪裁
+//!
+//! 能力位**拦不住**真心想用某项能力的人——他只要在自己的类型别名里把那一位写上就
+//! 够了。它的价值在于**强制显式**：想用某项能力，必须先把它**写下来**，于是这次
+//! 「升级」必然出现在类型别名、进而出现在 diff 与 code review 里，也能被 `grep`
+//! 出来。最贴切的类比是 `unsafe`：任何人都会写，但必须写。
+//!
+//! 因此每个能力的实现都分成两半，**职责不同、不互相替代**：
+//!
+//! | | 回答的问题 | 载体 |
+//! | --- | --- | --- |
+//! | 能力位（本模块） | 你**声明**了没有？ | `Runtime<CAPS>` 类型级标记 |
+//! | 能力值（如 [`crate::TrLocalScope`]） | 你**拿到**了没有？ | 具体类型的值 |
+//!
+//! 本地投递（`spawn_local`）把这条分工体现得最清楚，见下。
 
 /// 能力位：block_on（阻塞等待一个 future 完成）。
 pub const BLOCK_ON: usize = 1 << 0;
@@ -15,7 +31,27 @@ pub const BLOCK_ON: usize = 1 << 0;
 pub const DELAY: usize = 1 << 1;
 /// 能力位：spawn_send（投递任务到全局工作队列）。
 pub const SPAWN_SEND: usize = 1 << 2;
-/// 能力位：spawn_local（投递任务到线程本地队列）。
+/// 能力位：spawn_local（投递任务到线程本地队列）——**声明位**。
+///
+/// # 这一位与其它四位不同：它只负责「声明」，不负责「能不能调」
+///
+/// 本地投递除了「运行时支持」之外还有一条**环境前提**：必须存在一个本地队列并且
+/// 有人驱动它（tokio 需要 `LocalSet`、smol 需要 `LocalExecutor`、compio 由运行时
+/// 自带）。纯类型参数表达不了这条前提——类型对了、调用点错了，运行期才出问题。
+///
+/// 因此 `spawn_local` 的**调用点**不由本位移门控，而由**值**承载：拿不到
+/// [`TrLocalScope`](crate::TrLocalScope) 的实现值就没有 `spawn_local` 可调。
+/// 本位的职责只剩「声明」那一半：
+///
+/// - 业务库在类型别名里写上本位的**目的**，是让「我需要本地投递」这件事被显式
+///   记录、可审查；
+/// - 集成方要取得作用域值，**必须**经各后端的
+///   `Runtime<CAPS>::local_scope()`，而该关联函数要求 `CAPS` 含本位——
+///   于是「取得本地投递能力」这个动作在代码里留下了痕迹。
+///
+/// 注意本模块**不**承诺这条声明是无法绕过的：各后端的
+/// `LocalScope::new()` 仍是公开入口。声明位的价值是「必须写下来」，不是「写不下来
+/// 就用不了」。
 pub const SPAWN_LOCAL: usize = 1 << 3;
 /// 能力位：spawn_blocking（投递阻塞函数到阻塞线程池）。
 pub const SPAWN_BLOCKING: usize = 1 << 4;
@@ -100,5 +136,21 @@ mod tests {
     fn combined_mask_has_component_caps() {
         assert_has_block_on::<[(); BLOCK_ON | SPAWN_LOCAL]>();
         assert_has_spawn_local::<[(); BLOCK_ON | SPAWN_LOCAL]>();
+    }
+
+    /// 目的：固定能力位号分配，防止无意中挪动位号导致已发布的常量值改变。
+    ///
+    /// 实施策略：断言每一位的数值与 `FULL` 的组合结果。
+    ///
+    /// 通过依据：`SPAWN_LOCAL` 仍是位 3（`1 << 3 == 8`），`SPAWN_BLOCKING` 仍是
+    /// 位 4，`FULL == 31`；若有人插入新位而不复核，本断言会失败。
+    #[test]
+    fn bit_assignment_is_stable() {
+        assert_eq!(BLOCK_ON, 1);
+        assert_eq!(DELAY, 2);
+        assert_eq!(SPAWN_SEND, 4);
+        assert_eq!(SPAWN_LOCAL, 8);
+        assert_eq!(SPAWN_BLOCKING, 16);
+        assert_eq!(FULL, 31);
     }
 }

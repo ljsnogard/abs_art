@@ -14,13 +14,15 @@ abs_art = { path = "../abs_art", version = "0.3.0" }
 compio = { workspace = true }
 
 [features]
-default = ["block_on", "delay", "spawn_send", "spawn_local", "spawn_blocking"]
+default = ["block_on", "delay", "spawn_send", "local_scope", "spawn_blocking"]
 
 # 五个功能开关：按需启用，互不影响
 block_on = []
 delay = ["join_handle"]
 spawn_send = ["join_handle"]
-spawn_local = ["join_handle"]
+# 值化的本地作用域（`!Send` 任务 + 统一驱动入口）。
+# v0.3 起取代原来的类型级 `spawn_local` 能力位。
+local_scope = ["join_handle"]
 spawn_blocking = ["join_handle"]
 
 # 内部支持 feature：`JoinHandle` / `JoinError` 包装，被 `delay` 与 `spawn_*` 隐式启用

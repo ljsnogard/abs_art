@@ -34,10 +34,10 @@ test-backend-smol:
     cargo test -p abs_art-smol
     cargo check -p abs_art-bridge --no-default-features --features backend-smol
 
-# 跨后端 spawn_local 行为契约矩阵（3 个后端 × 3 个用例，同一份测试体）
+# 跨后端 spawn_local 行为契约矩阵（3 个后端 × 4 个用例，同一份测试体）
 #
-# 注意：在这轮「让 spawn_local 在三个后端上行为一致」的改造落地之前，
-# smol 的 B（运行时驱动）与 C（detach 后存活）两格是**预期失败**——
-# 这正是本冒烟测试要固定的缺口，见 abs_art-smoke 的 crate 文档。
+# 全部应当通过。这 12 格在 v0.3 的类型级 spawn_local 下曾有两格是红的
+# （smol 的「运行时驱动」与「detach 后存活」），路线 1 把本地队列改成由作用域值
+# 持有之后转绿；本配方同时是那次改造的验收标准与回归防线。
 smoke:
     cargo test -p abs_art-smoke

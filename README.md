@@ -20,12 +20,17 @@ pub async fn process<R>(...) -> ...          // 每个函数都要带一个 R �
 where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有代码
 ```
 
-> v0.3 起，`TrSpawnSend` / `TrSpawnLocal` / `TrSpawnBlocking` / `TrBlockOn`
-> 不再带 `F` 类型参数：被 spawn 的 future 类型是各自动**方法级泛型参数**。
+> v0.3 起，`TrSpawnSend` / `TrSpawnBlocking` / `TrBlockOn` 不再带 `F` 类型参数：
+> 被 spawn 的 future 类型是各自动**方法级泛型参数**。
 > 于是一个 `R: TrSpawnSend` 约束就能覆盖该运行时上**所有**任务类型
 > （包括调用点无法命名的 `async {}` 块），不必为每个 future 写一个
 > `TrSpawnSend<F>`。上面「泛型穿透」的痛点依然存在，但约束数量不再随
 > 任务种类增长。
+>
+> 同一版还把**本地投递**拆成了「声明位 + 作用域值」两半：`TrSpawnLocal` 不再存在，
+> 换代的是能力位 `SPAWN_LOCAL`（只负责声明）与 `TrLocalScope` / `LocalScope`
+> （负责真正的投递与驱动）。理由见
+> [「本地投递：一个声明位 + 一个作用域值」](#本地投递一个声明位--一个作用域值)。
 
 你的 API 被"运行时类型"污染，业务逻辑里全是与业务无关的泛型噪音。
 
@@ -91,27 +96,34 @@ fn main() {
 ```
 abs_art            基础 crate：不依赖任何运行时
                     ├─ enum Runtime（运行时标签）
-                    ├─ trait：TrBlockOn / TrSpawnSend / TrSpawnLocal /
-                    │          TrSpawnBlocking / TrDelay / TrAsyncRuntime / TrJoinHandle
+                    ├─ trait：TrBlockOn / TrSpawnSend / TrSpawnBlocking /
+                    │          TrDelay / TrAsyncRuntime / TrJoinHandle
                     │          （TrJoinHandle::detach：smol/compio 原生支持，
                     │           tokio 无原生 detach，drop 句柄即 detach——语义等价）
+                    ├─ trait：TrLocalScope —— 值化的「本地作用域」：本地队列的
+                    │          持有者 + 统一驱动入口（spawn_local / run_until /
+                    │          block_on）
                     └─ caps：能力位掩码（BLOCK_ON / DELAY / SPAWN_SEND /
                               SPAWN_LOCAL / SPAWN_BLOCKING）与类型级标记
+                              ※ 位只负责「声明」，真正的能力由值承载（见下）
 
-abs_art-tokio      tokio 后端：Runtime<const CAPS> 实现全部 trait
-abs_art-compio     compio 后端：同上
-abs_art-smol       smol 后端：同上
+abs_art-tokio      tokio 后端：Runtime<const CAPS> 实现全部 trait；
+                   另提供 LocalScope（内部 Rc<LocalSet>）与声明式入口
+                   Runtime::<CAPS>::local_scope()
+abs_art-compio     compio 后端：同上；LocalScope 为**零大小**
+                   （队列归运行时自己所有并由它驱动）
+abs_art-smol       smol 后端：同上；LocalScope 内部 Rc<LocalExecutor>
 
 abs_art-bridge     桥接：backend-tokio / backend-compio / backend-smol 三选一
-                   把 Runtime 与全部 trait / 能力常量重导出给业务代码
+                   把 Runtime / LocalScope 与全部 trait / 能力常量重导出给业务代码
 
 abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后端）
                     examples/ 下按后端分组（tokio_demo / compio_demo）的
                     每种 cap 一个 smoke test（features：demo-tokio / demo-compio）
 
 abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = false）
-                    同一份测试体（泛型于 Rt: TrSpawnLocal）分别跑在三个真实
-                    运行时上，输出 3 后端 × 3 用例的对比矩阵。
+                    同一份测试体（泛型于 S: TrLocalScope）分别跑在三个真实
+                    运行时上，输出 3 后端 × 4 用例的对比矩阵（全绿）。
                     测试体不走 bridge——bridge 的 backend-* 互斥，装不下
                     「三个后端同时对比」
 ```
@@ -127,9 +139,60 @@ abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = fa
 
 1. **能力检查发生在编译期**：`CAPS` 是 const 位掩码，`[(); CAPS]: HasBlockOn` 这类类型级标记在编译期被求解；`Runtime` 是零大小类型（ZST），`current()` 是 `const fn`——运行期没有任何能力相关的数据结构。
 2. **调用是静态分发**：`<CapRt as TrBlockOn>::block_on(...)` 在编译期被单态化为直接调用 tokio/compio/smol 的 API。**没有 vtable、没有 `Box`、没有 downcast、没有动态分发**——最终机器码与手写后端调用等价。
-3. **后端 crate 的五个功能（`block_on` / `delay` / `spawn_send` / `spawn_local` / `spawn_blocking`）是 feature 开关**：按需编译，不用的代码不进产物。
+3. **后端 crate 的五个功能（`block_on` / `delay` / `spawn_send` / `local_scope` / `spawn_blocking`）是 feature 开关**：按需编译，不用的代码不进产物。
 
 对比其它方案：运行时注入（log 风格）需要类型擦除 + 装箱 + downcast，每次调用都有开销；泛型穿透需要把 `R` 参数写进每个函数签名。abs_art 用"能力声明"把两者都省掉了——零开销，且签名干净。
+
+### 本地投递：一个声明位 + 一个作用域值
+
+`spawn_local` 被拆成两半，**职责不同、不互相替代**：
+
+| | 回答的问题 | 载体 |
+|---|---|---|
+| 能力位 `SPAWN_LOCAL` | 你**声明**了没有？ | `Runtime<CAPS>` 的类型级标记 |
+| 作用域值 `LocalScope` | 你**拿到**了没有？ | 实现 `TrLocalScope` 的具体值 |
+
+#### 位负责「声明」
+
+位**拦不住**真想用的人——把位写上就够了。它的价值在于**强制显式**：想开始用本地投递，就必须先把这件事写下来，于是它必然出现在类型别名、diff 与 code review 里，也能被 `grep` 出来。最贴切的类比是 `unsafe`：任何人都会写，但**必须写**。
+
+```rust
+use abs_art_bridge::{Runtime, SPAWN_LOCAL, TrLocalScope};
+
+type LocalRt = Runtime<{ SPAWN_LOCAL }>;   // ← 声明：这次「升级」留了痕
+let scope = LocalRt::local_scope();        // ← 取得：声明位是这条入口的门槛
+```
+
+`Runtime::<{ BLOCK_ON }>::local_scope()` 编译不过——负向演示见 `abs_art-demo` 的 `compile_fail` 文档测试 `local_scope_requires_declaration`。
+
+需要说清的是：**这不是安全边界**。`LocalScope::new()` 仍是公开入口，绕过声明依然可行；本位的价值是「你必须写下来」，不是「写不下来就用不了」。它约束的是**意外**，不是**恶意**。
+
+#### 值负责「事实」
+
+`spawn_local` 除了「运行时支持」之外还有一条**环境前提**：必须存在一个本地队列，并且有人在驱动它。三个后端的真实情况并不一样：
+
+| | 本地队列归谁所有 | 谁驱动它 |
+|---|---|---|
+| **tokio** | 调用方的 `LocalSet` | 调用方的驱动点（`run_until` / `block_on`） |
+| **smol** | 谁都不给，得自己建 `LocalExecutor` | 同样得自己驱动 |
+| **compio** | 运行时自己 | 运行时在 `block_on` 期间自己驱动 |
+
+这条前提**表达不进类型参数**：纯类型约束只能证明「你把位写对了」，证明不了「此刻真的有一条被驱动的队列」——类型对了、调用点错了，要到运行期才暴露（tokio 会直接 panic）。
+
+因此调用点由值把关：
+
+```rust
+scope.spawn_local(async move { *rc });        // 投递点
+rt.block_on(scope.run_until(async { .. }));   // 驱动点
+```
+
+好处有三条：
+
+1. **前提编译期可见**：拿不到作用域值就没有 `spawn_local` 可调；
+2. **三个后端如实表达自己**：tokio 的作用域装着 `LocalSet`，smol 的装着 `LocalExecutor`，compio 的是**零大小**——需要什么装什么，不需要就是空的；
+3. **任务与句柄解绑**：队列随作用域存活而不是随 `JoinHandle` 存活，因此 `detach()` 之后本地任务照常被驱动（这正是 `smux_v1` 的读 / 写循环所依赖的语义）。
+
+业务代码只依赖 `&impl TrLocalScope`，切换后端零改动；`LocalScope` 这个名字由 bridge 统一导出。
 
 ### 两种用法对照
 
@@ -154,22 +217,22 @@ just smoke                    # 跑跨后端 spawn_local 行为契约矩阵（�
 
 ### 跨后端 `spawn_local` 行为契约（`abs_art-smoke`）
 
-`just smoke` 用**同一份**测试体在 tokio / compio / smol 上各跑三个用例，量出
-`spawn_local` 的实际行为：
+`just smoke` 用**同一份**测试体在 tokio / compio / smol 上各跑四个用例：
 
 | 用例 | tokio | compio | smol |
 |---|---|---|---|
 | A 句柄驱动（spawn 后 await `JoinHandle`） | ✅ | ✅ | ✅ |
-| B 运行时驱动（宿主**不 poll 句柄**） | ✅ | ✅ | ❌ 宿主永久阻塞 |
-| C `detach()` 后循环继续被调度 | ✅ | ✅ | ❌ 任务被取消 |
+| B 运行时驱动（宿主**不 poll 句柄**，先等循环自己回报） | ✅ | ✅ | ✅ |
+| C `detach()` 后循环继续被调度 | ✅ | ✅ | ✅ |
+| D `scope.block_on` 便捷入口 | ✅ | ✅ | ✅ |
 
-**smol 的 B、C 两格目前是预期失败**：`abs_art-smol` 现在每次 `spawn_local` 都新建
-一个 `LocalExecutor` 并把它绑在 `JoinHandle` 上，句柄一旦被 poll 不到或 `detach()`
-掉，本地任务就再也推不动。这两格是后续「让 `spawn_local` 在三个后端上行为一致」
-这项改造的验收标准，调研结论与候选方案见
+**这 12 格曾经有两格是红的。** 在本 crate 建立时（v0.3 的类型级 `spawn_local`），
+smol 的 B、C 两格失败：那时 `abs_art-smol` 每次 `spawn_local` 都新建一个
+`LocalExecutor` 并把它绑在 `JoinHandle` 上，句柄一旦 poll 不到或被 `detach()` 掉，
+本地任务就再也推不动。把本地队列改成由**作用域值**持有之后两格转绿。
+
+调研过程、三个运行时的源码级能力对比与改造决策见
 [`dev-notes/spawn_local-20261002-1247.md`](dev-notes/spawn_local-20261002-1247.md)。
-
-（因此 `cargo test --workspace` 当前也会带上这 2 条失败——这是刻意的，不是回归。）
 
 `abs_art-demo` 的 smoke tests 按后端分组（`examples/tokio_demo/` 与
 `examples/compio_demo/`，每种 cap 组合一个 example）：

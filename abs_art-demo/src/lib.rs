@@ -31,12 +31,14 @@
 //!   后可以驱动借用栈数据的 future / 返回借用引用；
 //! - `cap_spawn_send.rs`：`BLOCK_ON | SPAWN_SEND` —— 跨线程（compio 为
 //!   线程本地交错）spawn、`TrJoinHandle` 句柄抽象、JoinErr 传播；
-//! - `cap_spawn_local.rs`：`SPAWN_LOCAL` —— `!Send` 的 `Rc` 任务（tokio 需
-//!   `LocalSet` 上下文；compio 运行时线程本地，无需额外上下文）；
+//! - `cap_spawn_local.rs`：本地作用域**值** —— `!Send` 的 `Rc` 任务（tokio 的
+//!   作用域装着 `LocalSet`；compio 的为零大小，队列归运行时自己所有）；
 //! - `cap_delay.rs`：`DELAY` —— 时间驱动与 time driver 前提；
 //! - `cap_spawn_blocking.rs`：`BLOCK_ON | SPAWN_BLOCKING` —— 阻塞线程池与
 //!   异步侧共存；
-//! - `cap_full.rs`：`FULL` —— 五种能力协同 + 后端自省（`tag()` / `about()`）；
+//! - `cap_full.rs`：`FULL` —— 五个能力位（含 `SPAWN_LOCAL` 声明位）+ 本地作用域
+//!   协同 + 后端自省
+//!   （`tag()` / `about()`）；
 //! - `cap_zero.rs`：`0` —— 零能力边界：`Runtime` 首先是类型标签，任何能力
 //!   调用都是编译错误。
 //!
@@ -72,9 +74,9 @@ compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（
 /// 这样 doctest / 下游代码可以统一写 `abs_art_demo::BLOCK_ON` 而不必关心
 /// 当前启用的是哪个后端实例。
 pub use abs_art_bridge::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Runtime, RuntimeTag,
-    TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal,
-    TrSpawnSend,
+    BLOCK_ON, DELAY, FULL, LocalScope, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Runtime,
+    RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope,
+    TrSpawnBlocking, TrSpawnSend,
 };
 
 /// 业务库声明的能力组合：只需要 `block_on` + `spawn_send` 两种能力。
@@ -295,17 +297,36 @@ pub mod strict_mode_check {
     /// ```
     pub mod spawn_requires_static {}
 
-    /// 5. 声明了 `BLOCK_ON | SPAWN_SEND`，调用 `spawn_local`（需要
-    ///    `SPAWN_LOCAL` 位）→ 编译错误。
+    /// 5. 本地投递**不通过类型参数调用**：`Runtime<CAPS>` 上没有 `spawn_local`
+    ///    方法——投递点在作用域值上。
+    ///
+    /// 这一条替代了 v0.3 之前的 `Runtime<{..}> as TrSpawnLocal`。注意它并不否定
+    /// 能力位：`SPAWN_LOCAL` 仍在，但它只负责**声明**（见下一条），不再门控调用点。
     ///
     /// ```compile_fail
-    /// use abs_art_demo::{BLOCK_ON, SPAWN_SEND, Runtime, TrSpawnLocal};
+    /// use abs_art_demo::{FULL, Runtime};
     ///
-    /// let _ = <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnLocal>::spawn_local(async { 1 });
+    /// // 即便声明了全部能力位，本地投递也不在 Runtime 上
+    /// let _ = Runtime::<FULL>::spawn_local(async { 1 });
     /// ```
-    pub mod no_spawn_local_without_local_cap {}
+    pub mod no_spawn_local_on_runtime_type {}
 
-    /// 6. `tag()` 是 `Runtime<FULL>` 的固有方法（`impl Runtime<FULL>`），
+    /// 6. 本地投递的**声明**：能力里没写 `SPAWN_LOCAL`，就不能经
+    ///    `Runtime::local_scope()` 取得作用域。
+    ///
+    /// 这一条演示的是**写在代码上的声明**（`unsafe` 式纪律），不是能力剪裁：
+    /// `LocalScope::new()` 仍是公开入口，绕过声明依然可行。本位的价值在于让
+    /// 「我要开始用本地投递」这件事必须被**写下来**，从而进入 diff 与 review。
+    ///
+    /// ```compile_fail
+    /// use abs_art_demo::{BLOCK_ON, Runtime};
+    ///
+    /// // 没写 SPAWN_LOCAL → 取不到作用域
+    /// let _ = Runtime::<{ BLOCK_ON }>::local_scope();
+    /// ```
+    pub mod local_scope_requires_declaration {}
+
+    /// 7. `tag()` 是 `Runtime<FULL>` 的固有方法（`impl Runtime<FULL>`），
     ///    不随 `CAPS` 泛化：零能力 `Runtime<0>` 没有它 → 编译错误。
     ///
     /// 自省请走 `TrAsyncRuntime::about()`（对所有 `CAPS` 实现，见

@@ -18,11 +18,25 @@
 //! # 业务代码用法
 //!
 //! ```no_run
-//! use abs_art_bridge::{BLOCK_ON, SPAWN_LOCAL, Runtime, TrBlockOn, TrSpawnLocal};
+//! use abs_art_bridge::{BLOCK_ON, LocalScope, SPAWN_SEND, Runtime, TrBlockOn, TrLocalScope, TrSpawnSend};
 //!
 //! // 声明所需能力；未声明（或后端不支持）的能力在编译期报错
-//! let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
+//! let rt = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
 //! let _ = rt;
+//! ```
+//!
+//! 本地投递（`!Send` 任务）不通过能力位声明，而是由**值** [`LocalScope`] 承载：
+//!
+//! ```no_run
+//! use abs_art_bridge::{LocalScope, TrLocalScope};
+//!
+//! let scope = LocalScope::new();
+//! # let _ = scope;
+//! // 在集成方创建好运行时之后：
+//! // OUTER_DRIVER(scope.run_until(async {
+//! //     let rc = std::rc::Rc::new(1u32);          // !Send：只有本地队列能承载
+//! //     scope.spawn_local(async move { *rc }).await.unwrap()
+//! // }))
 //! ```
 
 #![no_std]
@@ -32,7 +46,7 @@ extern crate std;
 
 pub use abs_art::{
     BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
-    TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrSpawnBlocking, TrSpawnLocal,
+    TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope, TrSpawnBlocking,
     TrSpawnSend,
 };
 
@@ -47,6 +61,22 @@ pub use abs_art_tokio::Runtime;
 /// 当前后端提供的 [`Runtime`] 类型（由 `backend-*` feature 决定）。
 #[cfg(feature = "backend-smol")]
 pub use abs_art_smol::Runtime;
+
+/// 当前后端提供的本地作用域类型（由 `backend-*` feature 决定）。
+///
+/// 三个后端各自的本地队列持有方式完全不同（tokio 是 `LocalSet`、smol 是
+/// `LocalExecutor`、compio 什么都不需要），但**对外是同一个名字**——业务代码只写
+/// `LocalScope`，切换后端时零改动。
+#[cfg(feature = "backend-compio")]
+pub use abs_art_compio::LocalScope;
+
+/// 当前后端提供的本地作用域类型（由 `backend-*` feature 决定）。
+#[cfg(feature = "backend-tokio")]
+pub use abs_art_tokio::LocalScope;
+
+/// 当前后端提供的本地作用域类型（由 `backend-*` feature 决定）。
+#[cfg(feature = "backend-smol")]
+pub use abs_art_smol::LocalScope;
 
 #[cfg(not(any(
     feature = "backend-tokio",
@@ -73,19 +103,22 @@ mod tests_tokio_ {
 
     use super::*;
 
-    /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`Runtime` 确实解析为
-    /// tokio 后端的运行时类型，且 Tag 能力机制可用。
+    /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`Runtime` 与 `LocalScope`
+    /// 确实解析为 tokio 后端的类型，且 Tag 能力机制可用。
     ///
-    /// 实施策略：比较 `Runtime::tag()` 与抽象标签，并构造一个声明了
-    /// `BLOCK_ON | SPAWN_LOCAL` 能力的 `Runtime` 类型。
+    /// 实施策略：比较 `Runtime::tag()` 与抽象标签，构造一个声明了
+    /// `BLOCK_ON | SPAWN_SEND` 能力的 `Runtime` 类型，并创建一个 `LocalScope`。
     ///
-    /// 通过依据：`tag()` 等于 [`RuntimeTag::Tokio`]；Tag 类型构造成功
+    /// 通过依据：`tag()` 等于 [`RuntimeTag::Tokio`]；Tag 类型与作用域构造成功
     /// （编译通过）即为通过。
     #[test]
     fn tokio_backend_resolves() {
         assert_eq!(Runtime::tag(), RuntimeTag::Tokio);
 
-        let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
+        let rt = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
         let _ = rt;
+
+        let scope = LocalScope::new();
+        let _ = scope;
     }
 }

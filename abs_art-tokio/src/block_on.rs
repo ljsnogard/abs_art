@@ -61,7 +61,7 @@ mod tests {
         time::Duration,
     };
 
-    use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
+    use abs_art::{BLOCK_ON, SPAWN_SEND, TrBlockOn};
 
     use crate::Runtime;
 
@@ -184,7 +184,7 @@ mod tests {
     /// 目的：验证 Tag 模式下，声明了 `BLOCK_ON` 能力的 `Runtime<Caps>` 确实
     /// 实现了 `TrBlockOn`（编译期能力检查的正向用例）。
     ///
-    /// 实施策略：用 `Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>` 调用 `current()`
+    /// 实施策略：用 `Runtime::<{ BLOCK_ON | SPAWN_SEND }>` 调用 `current()`
     /// 取得标记值，再通过 trait 关联函数调用 `block_on` 驱动一个 future。
     ///
     /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait
@@ -196,7 +196,7 @@ mod tests {
             .unwrap();
 
         let out = rt.block_on(async {
-            <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn>::block_on(async {
+            <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrBlockOn>::block_on(async {
                 40 + 2
             })
         });

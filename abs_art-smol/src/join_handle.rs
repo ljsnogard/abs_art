@@ -17,14 +17,18 @@ use crate::Runtime;
 /// smol 的任务不会「失败」（`smol::Task` 直接产出 `T`），因此
 /// [`JoinError`] 实际是不可达的（`Infallible`）。
 ///
-/// 对于 `spawn_local` 投递的任务，句柄还会持有对应的
-/// [`LocalExecutor`](smol::LocalExecutor)，并在每次 poll 时驱动它——
-/// 因为 smol 2.x 的 `block_on`（`async_io::block_on`）只轮询给定的 future，
-/// 不会驱动本地执行器，本地任务必须由宿主显式 tick 才会推进。
+/// # 句柄不再持有本地执行器
+///
+/// v0.3 之前，本类型在 `spawn_local` 场景下还持有一个
+/// [`LocalExecutor`](smol::LocalExecutor)，并在每次 poll 时顺带 tick 它——于是
+/// 「本地任务能否推进」取决于「调用方有没有在 poll 句柄」，`detach()` 消费句柄
+/// 还会连带销毁执行器、把任务当场取消。
+///
+/// 现在执行器归 [`LocalScope`](crate::LocalScope) 所有，本类型只是
+/// `smol::Task` 的薄包装：是否能推进与句柄无关，`detach()` 也回到「任务继续跑、
+/// 只是不要结果」的正常语义。
 pub struct JoinHandle<T> {
     inner: smol::Task<T>,
-    /// `spawn_local` 专用：驱动本地任务的执行器；普通 `spawn` 为 `None`。
-    local_ex: Option<smol::LocalExecutor<'static>>,
 }
 
 impl<T> TrJoinHandle<T> for JoinHandle<T>
@@ -34,19 +38,15 @@ where
     type JoinErr = JoinError;
 
     /// smol 有原生 `Task::detach`（底层 async-task：置 detached 标志后 forget），
-    /// 任务继续在全局执行器的后台线程上运行，完成后输出被丢弃。
+    /// 任务继续在它所属的执行器上运行，完成后输出被丢弃。
     ///
     /// **不能**靠 drop 实现：async-task 的 `Task` 在 drop 时会 `set_canceled()`
     /// 取消任务——必须显式调用原生 `detach`。
     ///
-    /// 限制：`spawn_local` 投递的本地任务，其本地执行器随本句柄存活（句柄
-    /// poll 时驱动执行器）；detach 消费句柄后执行器随之销毁，任务无法继续
-    /// 被驱动（等同取消）。因此 smol 后端的 `detach` 只对 `spawn`（全局执行器）
-    /// 任务有完整语义。
+    /// 本地任务（`spawn_local` 投递）的执行器由
+    /// [`LocalScope`](crate::LocalScope) 持有，因此这里 detach 之后任务照常推进。
     fn detach(self) {
         self.inner.detach();
-        // 部分移动：inner 已消费；local_ex（若有）随函数结束被 drop，
-        // 本地执行器销毁 → 本地任务无法继续推进（见上面的限制说明）
     }
 }
 
@@ -62,23 +62,7 @@ impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
 impl<T> From<smol::Task<T>> for JoinHandle<T> {
     #[inline]
     fn from(task: smol::Task<T>) -> Self {
-        JoinHandle {
-            inner: task,
-            local_ex: None,
-        }
-    }
-}
-
-impl<T> JoinHandle<T> {
-    /// 从本地执行器投递的任务构造句柄，并携带执行器用于后续驱动。
-    pub(crate) fn from_local(
-        task: smol::Task<T>,
-        ex: smol::LocalExecutor<'static>,
-    ) -> Self {
-        JoinHandle {
-            inner: task,
-            local_ex: Some(ex),
-        }
+        JoinHandle { inner: task }
     }
 }
 
@@ -89,14 +73,9 @@ where
     type Output = Result<T, JoinError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        // 若是本地任务，先驱动一次本地执行器，让任务有机会推进/完成。
-        if let Some(ex) = &this.local_ex {
-            while ex.try_tick() {}
-        }
-
         // smol 的 Task（async-task）是 Unpin，可以直接投影。
+        // 注意：这里**不再**顺带驱动任何执行器——驱动是 LocalScope 的职责。
+        let this = self.get_mut();
         Pin::new(&mut this.inner).poll(cx).map(Ok)
     }
 }

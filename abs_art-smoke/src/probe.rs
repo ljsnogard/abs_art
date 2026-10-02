@@ -1,9 +1,8 @@
 //! 跨后端共享的探测体：**同一份代码**分别跑在 tokio / compio / smol 上。
 //!
-//! 这里的三个函数都是泛型于 `Rt: TrSpawnLocal` 的 async fn，因此它们不感知
-//! 任何具体后端——后端差异只体现在测试文件里那几行「创建运行时 + 驱动」的
-//! 驱动代码上。这样一来，「三个后端行为是否一致」这个问题的答案就只取决于
-//! `abs_art` 的实现，而不是取决于三份各写各的测试代码。
+//! 这里的三个函数都泛型于 `S: TrLocalScope`，接收的是**作用域值**而不是运行时
+//! 类型参数——这正是 v0.3 路线 1 的核心：本地队列从「隐式环境」变成「显式值」，
+//! 后端差异全部被那个值吃掉，业务侧一份代码三个后端通用。
 //!
 //! 三个探测点从弱到强：
 //!
@@ -15,7 +14,7 @@ use core::array::from_fn;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use abs_art::{TrJoinHandle, TrSpawnLocal};
+use abs_art::{TrJoinHandle, TrLocalScope};
 use async_channel::unbounded;
 
 /// 冒烟测试同时投放的循环任务个数。
@@ -60,23 +59,23 @@ pub fn expected_sum(idx: usize) -> u32 {
 
 /// 探测点 A：句柄驱动。
 ///
-/// 宿主 `spawn_local` 之后**立即 await `JoinHandle`**，由句柄把结果交回上层。
-/// 这是最弱的一条用法，也是三个后端当前都能满足的一条（`smol` 后端在句柄被
-/// poll 时会顺带 tick 自己新建的本地执行器）。
+/// 宿主经作用域 `spawn_local` 之后**立即 await `JoinHandle`**，由句柄把结果交回
+/// 上层。这是最弱的一条用法，但它同时验证了「投递点」与「驱动点」都在作用域上：
+/// 句柄能拿到结果，说明作用域确实在驱动队列。
 ///
 /// # Errors
 ///
 /// 句柄返回 join 错误，或任务里记录到的本地状态与句柄结果不一致。
-pub async fn probe_a_handle_driven<Rt>() -> Result<u32, String>
+pub async fn probe_a_handle_driven<S>(scope: &S) -> Result<u32, String>
 where
-    Rt: TrSpawnLocal,
+    S: TrLocalScope,
 {
-    // 捕获 Rc 把 future 钉成 !Send：确保走的确实是 spawn_local，
-    // 而不是一个「恰好也能用 spawn 跑」的 Send 任务。
+    // 捕获 Rc 把 future 钉成 !Send：确保走的确实是本地队列，
+    // 而不是一个「恰好也能用全局 spawn 跑」的 Send 任务。
     let marker = Rc::new(RefCell::new(0u32));
     let task_local = marker.clone();
 
-    let handle = Rt::spawn_local(async move {
+    let handle = scope.spawn_local(async move {
         *task_local.borrow_mut() += 42;
         42u32
     });
@@ -92,26 +91,26 @@ where
     Ok(joined)
 }
 
-/// 探测点 B：**运行时驱动**——宿主不 poll 任何 `JoinHandle`。
+/// 探测点 B：**运行时（作用域）驱动**——宿主不 poll 任何 `JoinHandle`。
 ///
 /// 流程严格按 `smux_v1` 所需语义编排：
 ///
-/// 1. 投递 [`LOOP_COUNT`] 个「消费消息死循环」任务，每个任务捕获一个 `Rc`
-///    （`!Send`）并独占一个消息通道；
+/// 1. 经作用域投递 [`LOOP_COUNT`] 个「消费消息死循环」任务，每个任务捕获一个
+///    `Rc`（`!Send`）并独占一个消息通道；
 /// 2. 宿主把正常消息与**最后一条退出消息**投递进去；
 /// 3. 宿主先等各循环**自己**发出的完成回执——此刻宿主还没有 poll 过任何
-///    `JoinHandle`，因此循环能推进只能来自「运行时驱动了本地队列」；
+///    `JoinHandle`，因此循环能推进只能来自「作用域在驱动本地队列」；
 /// 4. 之后再逐个 await `JoinHandle`，核对每个循环的结果。
 ///
-/// 第 3 步是本探测点的全部价值所在：若本地队列只能靠 poll 句柄来推进（`smol`
-/// 后端目前的实现），宿主会在这里被永久阻塞。
+/// 第 3 步是本探测点的全部价值所在：若本地队列只能靠 poll 句柄来推进，
+/// 宿主会在这里被永久阻塞。
 ///
 /// # Errors
 ///
 /// 投递失败、循环未在期限内回报、句柄返回 join 错误，或结果与预期不符。
-pub async fn probe_b_runtime_driven<Rt>() -> Result<Vec<LoopResult>, String>
+pub async fn probe_b_runtime_driven<S>(scope: &S) -> Result<Vec<LoopResult>, String>
 where
-    Rt: TrSpawnLocal,
+    S: TrLocalScope,
 {
     let (done_tx, done_rx) = unbounded::<usize>();
 
@@ -128,7 +127,7 @@ where
         let done = done_tx.clone();
         let counter = consumed.clone();
 
-        handles.push(Rt::spawn_local(async move {
+        handles.push(scope.spawn_local(async move {
             let mut sum = 0u32;
             // 刻意写成显式的 `loop` + `match`，而不是 clippy 建议的
             // `while let Ok(..) = ..`：本用例测的就是「最后一个退出消息让循环跳出」
@@ -166,11 +165,12 @@ where
     }
 
     // 关键一步：先等循环自己回报完成。此刻没有任何 JoinHandle 被 poll，
-    // 循环的推进只能来自运行时对本地队列的驱动。
+    // 循环的推进只能来自作用域对本地队列的驱动。
     for _ in 0..LOOP_COUNT {
-        done_rx.recv().await.map_err(|e| {
-            format!("循环任务未回报完成，宿主被阻塞（本地队列没有被运行时驱动）：{e}")
-        })?;
+        done_rx
+            .recv()
+            .await
+            .map_err(|e| format!("循环任务未回报完成，宿主被阻塞（本地队列没有被驱动）：{e}"))?;
     }
 
     // 再经 JoinHandle 把结果收回上层
@@ -207,20 +207,19 @@ where
 
 /// 探测点 C：`detach()` 之后循环必须继续被调度。
 ///
-/// 这是 `smux_v1` 的实际用法：`Rt::spawn_local(read_fut).detach()`——投递之后
-/// **立即**脱手，此后不存句柄、不 poll 句柄，循环完全靠运行时推进，直到自己
-/// 收到退出消息（`smux_v1` 用取消令牌 + 消息收尾）。
+/// 这是 `smux_v1` 的实际用法：`scope.spawn_local(read_fut).detach()`——投递之后
+/// **立即**脱手，此后不存句柄、不 poll 句柄，循环完全靠作用域推进，直到自己收到
+/// 退出消息（`smux_v1` 用取消令牌 + 消息收尾）。
 ///
-/// 因此本探测点的结果**不可能**经 `JoinHandle` 交回（句柄已被消费），只能由
-/// 循环自己经通道回报——这恰好就是「句柄与任务解绑」这件事的判定标准：若
-/// `detach` 实际取消了任务，循环不会回报，宿主会在此阻塞或看到通道关闭。
+/// 本探测点是「本地队列归作用域所有」这条设计的直接试金石：句柄被消费后任务还能
+/// 推进，只可能是因为队列的持有者是作用域而不是句柄。
 ///
 /// # Errors
 ///
 /// 循环未回报（被取消或从未被调度），或回报的求和与预期不符。
-pub async fn probe_c_detach_survives<Rt>() -> Result<u32, String>
+pub async fn probe_c_detach_survives<S>(scope: &S) -> Result<u32, String>
 where
-    Rt: TrSpawnLocal,
+    S: TrLocalScope,
 {
     let (msg_tx, msg_rx) = unbounded::<Msg>();
     let (done_tx, done_rx) = unbounded::<u32>();
@@ -228,9 +227,8 @@ where
     let marker = Rc::new(RefCell::new(0u32));
     let task_local = marker.clone();
 
-    let handle = Rt::spawn_local(async move {
+    let handle = scope.spawn_local(async move {
         let mut sum = 0u32;
-        // 与 probe_b 同理：退出分支必须显式可见，故保留 `loop` + `match`
         #[allow(clippy::while_let_loop)]
         loop {
             match msg_rx.recv().await {

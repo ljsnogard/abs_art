@@ -171,19 +171,19 @@ mod tests {
     /// 实现了 `TrBlockOn`（编译期能力检查的正向用例）。
     ///
     /// 实施策略：在 compio 运行时上下文内，用
-    /// `Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>` 的 trait 关联函数调用
+    /// `Runtime::<{ BLOCK_ON | SPAWN_SEND }>` 的 trait 关联函数调用
     /// `block_on` 驱动一个 future。
     ///
     /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait
     /// impl 有误，将无法编译。
     #[test]
     fn tagged_runtime_implements_block_on() {
-        use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
+        use abs_art::{BLOCK_ON, SPAWN_SEND, TrBlockOn};
 
         let rt = CompioRuntime::new().unwrap();
 
         let out = rt.block_on(async {
-            <Runtime<{ BLOCK_ON | SPAWN_LOCAL }> as TrBlockOn>::block_on(async {
+            <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrBlockOn>::block_on(async {
                 40 + 2
             })
         });

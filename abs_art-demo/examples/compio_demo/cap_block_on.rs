@@ -20,8 +20,9 @@
 //!
 //! # 不能做到
 //!
-//! - `spawn` / `spawn_local` / `delay` 等未声明能力 → **编译错误**（负向演示
-//!   见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
+//! - `spawn` / `delay` 等未声明能力 → **编译错误**；`spawn_local` 同样不可用，
+//!   但原因是它根本不由能力位承载（本地投递要持有 `LocalScope` 值）
+//!   （负向演示见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
 //!   `compile_fail` 文档测试）；
 //! - 在没有任何 compio 运行时上下文的线程里调用（compio 实现依赖
 //!   `Runtime::with_current`，无上下文会 panic）——「必须处于运行时上下文内」
