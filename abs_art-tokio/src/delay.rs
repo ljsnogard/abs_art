@@ -29,8 +29,11 @@ impl<const CAPS: usize> TrDelay for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
 {
+    /// 本后端的睡眠 future 类型：`tokio::time::Sleep`（具体、`Send`、`Unpin`）。
+    type Delay = tokio::time::Sleep;
+
     /// 返回一个等待 `duration` 之后完成的 future。
-    fn delay(duration: Duration) -> impl Future<Output = ()> {
+    fn delay(duration: Duration) -> Self::Delay {
         tokio::time::sleep(duration)
     }
 }

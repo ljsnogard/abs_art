@@ -262,7 +262,16 @@ pub trait TrBlockOn {
 }
 
 /// 暂停当前执行上下文一段时间。
+///
+/// 这是计时能力的**最小原语**；周期与超时见 [`crate::time::TrTime`]（它是本 trait 的
+/// 超 trait，**不**重复提供「睡眠」这个能力）。
 pub trait TrDelay {
+    /// [`TrDelay::delay`] 返回的 future 类型（由后端给出**具体类型**）。
+    ///
+    /// 是关联类型而不是 `impl Future`：调用方因此能**命名**它——可以存进结构体、
+    /// 可以写 `where Self::Delay: Send`，自动 trait 不再被不透明类型挡住。
+    type Delay: Future<Output = ()>;
+
     /// 返回一个等待 `duration` 之后完成的 future。
-    fn delay(duration: core::time::Duration) -> impl Future<Output = ()>;
+    fn delay(duration: core::time::Duration) -> Self::Delay;
 }

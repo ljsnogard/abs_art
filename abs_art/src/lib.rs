@@ -6,6 +6,8 @@
 //! - [`runtime`] 中的一组能力 trait（`TrBlockOn` / `TrSpawnSend`
 //!   / `TrSpawnBlocking` / `TrDelay`）与值化的本地作用域 trait
 //!   [`TrLocalScope`]；
+//! - [`time`]：计时能力 trait（[`TrTime`] / [`TrInterval`]）与超时失败类型
+//!   [`Elapsed`]、以及在后端之上组合出超时的自由函数 [`timeout`]；
 //! - [`caps`]：能力位掩码与类型级标记，供组合 crate 的 `Runtime<const CAPS>`
 //!   做编译期能力检查。
 //!
@@ -25,8 +27,12 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod caps;
 pub mod runtime;
+pub mod time;
 
 pub use caps::{
     BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, HasBlockOn,
@@ -36,3 +42,4 @@ pub use runtime::{
     RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend,
 };
+pub use time::{Elapsed, Timeout, TrInterval, TrTime, UnitFuture};

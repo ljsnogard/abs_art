@@ -34,8 +34,15 @@ impl<const CAPS: usize> TrDelay for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
 {
+    /// 本后端的睡眠 future 类型。
+    ///
+    /// compio 的 `sleep` 是 `pub async fn`（返回**不透明**类型），家族里只有本 crate
+    /// 需要 `impl_trait_in_assoc_type`（ITIT）把它命名出来；因果见
+    /// `dev-notes/time-20261005-1225.md` §11。
+    type Delay = impl Future<Output = ()>;
+
     /// 返回一个等待 `duration` 之后完成的 future。
-    fn delay(duration: Duration) -> impl Future<Output = ()> {
+    fn delay(duration: Duration) -> Self::Delay {
         compio::runtime::time::sleep(duration)
     }
 }

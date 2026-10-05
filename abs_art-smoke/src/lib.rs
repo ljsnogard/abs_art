@@ -60,6 +60,7 @@
 
 pub mod harness;
 pub mod probe;
+pub mod time_probe;
 
 pub use harness::{CASE_TIMEOUT, run_case};
 pub use probe::{

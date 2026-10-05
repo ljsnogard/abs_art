@@ -3,7 +3,7 @@
 use core::time::Duration;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::{HasDelay, TrDelay};
+use abs_art::{HasDelay, TrDelay, UnitFuture};
 
 /// 异步地睡眠 `duration`。
 pub async fn sleep(duration: Duration) {
@@ -30,9 +30,15 @@ impl<const CAPS: usize> TrDelay for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
 {
+    /// 本后端的睡眠 future 类型。
+    ///
+    /// `smol::Timer` 完成时返回**到期时刻**（`Instant`），而 [`TrDelay::Delay`] 要求
+    /// `Output = ()`，因此用共享的 [`UnitFuture`] 包一层。
+    type Delay = UnitFuture<smol::Timer>;
+
     /// 返回一个等待 `duration` 之后完成的 future。
-    async fn delay(duration: Duration) {
-        smol::Timer::after(duration).await;
+    fn delay(duration: Duration) -> Self::Delay {
+        UnitFuture::new(smol::Timer::after(duration))
     }
 }
 

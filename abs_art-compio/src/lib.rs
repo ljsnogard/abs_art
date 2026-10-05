@@ -3,7 +3,7 @@
 //! 提供五个功能（各自为 feature 开关）：
 //!
 //! - `block_on`：阻塞等待一个 future 完成；
-//! - `delay`：睡眠 / 延迟执行；
+//! - `delay`：睡眠 / 延迟执行，以及计时能力（[`TrTime`]：睡眠 + 周期源）；
 //! - `spawn_send`：投递任务到运行时队列；
 //! - `local_scope`：值化的本地作用域（`!Send` 任务 + 统一驱动入口）；
 //! - `spawn_blocking`：投递阻塞函数到阻塞线程池。
@@ -58,14 +58,18 @@
 //! ```
 
 #![no_std]
+// 家族里**只有本 crate** 需要 nightly：compio 的睡眠/周期/超时 future 全是
+// `pub async fn`（不透明、不可命名），关联类型只能用 ITIT（`impl Future`）给出。
+// 因果与取舍见 `dev-notes/time-20261005-1225.md` §11。
+#![feature(impl_trait_in_assoc_type)]
 
 #[cfg(test)]
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
-    TrAsyncRuntime,
-    TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope, TrSpawnBlocking, TrSpawnSend,
+    BLOCK_ON, DELAY, Elapsed, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
+    RuntimeTag, Timeout, TrAsyncRuntime, TrBlockOn, TrDelay, TrInterval,
+    TrJoinHandle, TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
 };
 
 /// compio 组合运行时标记类型。
@@ -107,6 +111,9 @@ mod block_on;
 
 #[cfg(feature = "delay")]
 pub mod delay;
+
+#[cfg(feature = "delay")]
+pub mod time;
 
 #[cfg(feature = "spawn_send")]
 mod spawn_send;
