@@ -1,18 +1,33 @@
 //! 跨后端共享的探测体：**同一份代码**分别跑在 tokio / compio / smol 上。
 //!
-//! 这里的三个函数都泛型于 `R: TrLocalScope`，接收的是**运行时值**（`&R`）而不是
-//! 运行时类型参数、也不是独立的作用域对象——这正是 v0.4「值化」的核心：本地队列
-//! 从「隐式环境」变成「运行时值自己持有的东西」，后端差异全部被那个值吃掉，
-//! 业务侧一份代码三个后端通用。
+//! 这里的三个函数都泛型于 `S: TrLocalScope`，接收的是**作用域值**（`&S`）——
+//! 本地队列是**线程独占**的资源，不并进运行时值：tokio 的 `LocalSet`、smol 的
+//! `LocalExecutor` 都 `!Send`，必须由持有者在创建它的线程上驱动；compio 的队列
+//! 虽然归运行时自带，抽象层也把它表达成一个独立的零大小作用域。于是「投递到哪条
+//! 本地队列、由谁驱动」由这个值回答，`spawn_local` / `run_until` / `block_on`
+//! 三个入口都在它身上。
 //!
-//! 与 v0.3 的差别只在**调用形状**上：那时能力是无 `self` 的关联函数、本地队列挂在
-//! 另一个 `LocalScope` 值上（`<Rt as TrSpawnSend>::spawn(f)` + `scope.spawn_local(f)`）；
-//! 现在两者都并到了同一个值上（`rt.spawn(f)` + `rt.spawn_local(f)`）。
-//! 三条契约的**语义与判定标准一字未改**。
+//! 作用域**不是**凭空出现的：只能经 `Runtime<CAPS>::local_scope()` 取得（要求
+//! `CAPS` 含 [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL)），这一步把「声明」与「取得」
+//! 串了起来。因此集成侧的骨架是「造运行时**值** → `rt.local_scope()` → 驱动作用域」。
 //!
-//! 三个探测点从弱到强：
+//! # 调用形状的三代对照（语义与判定标准一字未改）
 //!
-//! - [`probe_a_handle_driven`]：宿主 spawn 后立即 await `JoinHandle`；
+//! | 能力 | 原设计（类型级 + 独立作用域） | 中间版（全并进运行时值） | 本轮（值 + 独立作用域） |
+//! | --- | --- | --- | --- |
+//! | 本地投递 | `scope.spawn_local(f)` | `rt.spawn_local(f)` | `scope.spawn_local(f)` |
+//! | 异步驱动本地队列 | `scope.run_until(f)` | `rt.run_until(f)` | `scope.run_until(f)` |
+//! | 阻塞驱动本地队列 | `scope.block_on(f)` | `rt.block_on(f)`（`TrBlockOn`） | `scope.block_on(f)`（`TrLocalScope`） |
+//! | 取得作用域 | 后端自建 | 不存在独立作用域 | `rt.local_scope()` |
+//! | 时间（`delay` / `interval` / `now` / `timeout`） | 类型级 | 运行时值 | 运行时值（**不在作用域上**，见 [`crate::time_probe`]） |
+//!
+//! 计时与时刻**不**跟着作用域走：作用域只回答「`!Send` 任务投到哪、由谁驱动」。
+//! 这条分工由 [`crate::time_probe::probe_time_capability_comes_from_the_runtime`]
+//! 直接钉住。
+//!
+//! # 三个探测点从弱到强
+//!
+//! - [`probe_a_handle_driven`]：宿主投递后立即 await `JoinHandle`；
 //! - [`probe_b_runtime_driven`]：宿主**不 poll 任何句柄**，先等循环自己回报；
 //! - [`probe_c_detach_survives`]：`detach()` 之后循环仍须被调度。
 
@@ -65,23 +80,29 @@ pub fn expected_sum(idx: usize) -> u32 {
 
 /// 探测点 A：句柄驱动。
 ///
-/// 宿主经运行时值 `spawn_local` 之后**立即 await `JoinHandle`**，由句柄把结果交回
-/// 上层。这是最弱的一条用法，但它同时验证了「投递点」与「驱动点」都在同一个值上：
-/// 句柄能拿到结果，说明这个运行时值确实在驱动它自己的本地队列。
+/// 宿主经**作用域值** `spawn_local` 之后**立即 await `JoinHandle`**，由句柄把结果
+/// 交回上层。这是最弱的一条用法，但它同时验证了「投递点」与「驱动点」都在作用域上：
+/// 句柄能拿到结果，说明这个作用域确实在驱动它自己的本地队列。
+///
+/// # 参数为什么是作用域而不是运行时值
+///
+/// 投递 `!Send` 任务只有一个入口——`TrLocalScope::spawn_local`；运行时值上**没有**
+/// 这个方法（本地队列不归它所有）。因此本探针收 `&S`，而句柄类型来自
+/// `S::Handle<T>`，与具体后端解耦。
 ///
 /// # Errors
 ///
 /// 句柄返回 join 错误，或任务里记录到的本地状态与句柄结果不一致。
-pub async fn probe_a_handle_driven<R>(rt: &R) -> Result<u32, String>
+pub async fn probe_a_handle_driven<S>(scope: &S) -> Result<u32, String>
 where
-    R: TrLocalScope,
+    S: TrLocalScope,
 {
     // 捕获 Rc 把 future 钉成 !Send：确保走的确实是本地队列，
     // 而不是一个「恰好也能用全局 spawn 跑」的 Send 任务。
     let marker = Rc::new(RefCell::new(0u32));
     let task_local = marker.clone();
 
-    let handle = rt.spawn_local(async move {
+    let handle = scope.spawn_local(async move {
         *task_local.borrow_mut() += 42;
         42u32
     });
@@ -97,15 +118,15 @@ where
     Ok(joined)
 }
 
-/// 探测点 B：**运行时值驱动**——宿主不 poll 任何 `JoinHandle`。
+/// 探测点 B：**作用域驱动**——宿主不 poll 任何 `JoinHandle`。
 ///
 /// 流程严格按 `smux_v1` 所需语义编排：
 ///
-/// 1. 经运行时值投递 [`LOOP_COUNT`] 个「消费消息死循环」任务，每个任务捕获一个
+/// 1. 经作用域投递 [`LOOP_COUNT`] 个「消费消息死循环」任务，每个任务捕获一个
 ///    `Rc`（`!Send`）并独占一个消息通道；
 /// 2. 宿主把正常消息与**最后一条退出消息**投递进去；
 /// 3. 宿主先等各循环**自己**发出的完成回执——此刻宿主还没有 poll 过任何
-///    `JoinHandle`，因此循环能推进只能来自「这个运行时值在驱动本地队列」；
+///    `JoinHandle`，因此循环能推进只能来自「这个作用域在驱动本地队列」；
 /// 4. 之后再逐个 await `JoinHandle`，核对每个循环的结果。
 ///
 /// 第 3 步是本探测点的全部价值所在：若本地队列只能靠 poll 句柄来推进，
@@ -114,9 +135,9 @@ where
 /// # Errors
 ///
 /// 投递失败、循环未在期限内回报、句柄返回 join 错误，或结果与预期不符。
-pub async fn probe_b_runtime_driven<R>(rt: &R) -> Result<Vec<LoopResult>, String>
+pub async fn probe_b_runtime_driven<S>(scope: &S) -> Result<Vec<LoopResult>, String>
 where
-    R: TrLocalScope,
+    S: TrLocalScope,
 {
     let (done_tx, done_rx) = unbounded::<usize>();
 
@@ -133,7 +154,7 @@ where
         let done = done_tx.clone();
         let counter = consumed.clone();
 
-        handles.push(rt.spawn_local(async move {
+        handles.push(scope.spawn_local(async move {
             let mut sum = 0u32;
             // 刻意写成显式的 `loop` + `match`，而不是 clippy 建议的
             // `while let Ok(..) = ..`：本用例测的就是「最后一个退出消息让循环跳出」
@@ -213,19 +234,19 @@ where
 
 /// 探测点 C：`detach()` 之后循环必须继续被调度。
 ///
-/// 这是 `smux_v1` 的实际用法：`rt.spawn_local(read_fut).detach()`——投递之后
-/// **立即**脱手，此后不存句柄、不 poll 句柄，循环完全靠运行时值推进，直到自己收到
+/// 这是 `smux_v1` 的实际用法：`scope.spawn_local(read_fut).detach()`——投递之后
+/// **立即**脱手，此后不存句柄、不 poll 句柄，循环完全靠作用域推进，直到自己收到
 /// 退出消息（`smux_v1` 用取消令牌 + 消息收尾）。
 ///
-/// 本探测点是「本地队列归运行时值所有」这条设计的直接试金石：句柄被消费后任务还能
-/// 推进，只可能是因为队列的持有者是运行时值而不是句柄。
+/// 本探测点是「本地队列归作用域所有」这条设计的直接试金石：句柄被消费后任务还能
+/// 推进，只可能是因为队列的持有者是作用域而不是句柄。
 ///
 /// # Errors
 ///
 /// 循环未回报（被取消或从未被调度），或回报的求和与预期不符。
-pub async fn probe_c_detach_survives<R>(rt: &R) -> Result<u32, String>
+pub async fn probe_c_detach_survives<S>(scope: &S) -> Result<u32, String>
 where
-    R: TrLocalScope,
+    S: TrLocalScope,
 {
     let (msg_tx, msg_rx) = unbounded::<Msg>();
     let (done_tx, done_rx) = unbounded::<u32>();
@@ -233,7 +254,7 @@ where
     let marker = Rc::new(RefCell::new(0u32));
     let task_local = marker.clone();
 
-    let handle = rt.spawn_local(async move {
+    let handle = scope.spawn_local(async move {
         let mut sum = 0u32;
         #[allow(clippy::while_let_loop)]
         loop {

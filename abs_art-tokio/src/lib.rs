@@ -22,7 +22,7 @@
 //! 同一个进程里存在两套运行时（例如测试二进制里 tokio 与 compio 并存）时，
 //! 「哪条队列、哪个运行时」由你手上的值回答，不需要靠约定。
 //!
-//! 代价：值必须被**构造**出来（不像 v0.3 的 ZST 那样随处可写），且当它持有本地
+//! 代价：值必须被**构造**出来（不像原来的 ZST 那样随处可写），且当它持有本地
 //! 队列时是 `!Send`——本地队列本来就绑定线程。
 //!
 //! # 两种用法
@@ -72,19 +72,18 @@
 //!
 //! ## 本地投递（`!Send` 任务）
 //!
-//! 本地队列归运行时**值**所有，投递与驱动都在同一个值上：
+//! 本地队列是一个独立的作用域值，由运行时值交出来：
 //!
 //! ```
 //! use abs_art::TrLocalScope;
-//! use abs_art_tokio::Runtime;
 //!
 //! let rt = tokio::runtime::Runtime::new().unwrap();
 //! let out = rt.block_on(async {
-//!     let tokio_rt = abs_art_tokio::current();
-//!     tokio_rt
+//!     let scope = abs_art_tokio::current().local_scope(); // 要求 CAPS 含 SPAWN_LOCAL
+//!     scope
 //!         .run_until(async {
 //!             let rc = std::rc::Rc::new(6u32); // !Send：只有本地队列能承载
-//!             tokio_rt.spawn_local(async move { *rc * 7 }).await.unwrap()
+//!             scope.spawn_local(async move { *rc * 7 }).await.unwrap()
 //!         })
 //!         .await
 //! });
@@ -98,8 +97,6 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "local_scope")]
-use alloc::rc::Rc;
 use core::fmt;
 
 use abs_art::RuntimeTag;
@@ -112,8 +109,8 @@ pub use abs_art::{
 
 /// tokio 组合运行时**值**。
 ///
-/// 对应基础 crate 中的 [`RuntimeTag::Tokio`]。它抓住构造点的 tokio 句柄，并在
-/// `local_scope` feature 开启时持有一条自己的本地队列（`Rc<LocalSet>`）。
+/// 对应基础 crate 中的 [`RuntimeTag::Tokio`]。它抓住构造点的 tokio 句柄，
+/// 是 `Send + Sync` 的把手；本地队列由 [`LocalScope`] 承载（见类型与 crate 文档）。
 ///
 /// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认 [`FULL`]（全功能），
 /// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_SEND }>` 只声明部分能力。掩码决定这个
@@ -126,14 +123,14 @@ pub use abs_art::{
 ///
 /// # 克隆
 ///
-/// `Clone` 共享**同一条**本地队列与同一个运行时句柄——克隆出来的值与原来的值
-/// 是同一个运行时的两个把手，不是两份运行时。
+/// `Clone` 复制的是运行时**把手**（同一个 tokio 运行时）——不是新运行时。
+/// 本地队列不在本类型里，因此克隆不涉及队列（见 [`LocalScope`]）。
 pub struct Runtime<const CAPS: usize = FULL> {
-    /// 构造点抓住的 tokio 句柄：`spawn` / `block_on` 都打在它上面。
+    /// 构造点抓住的 tokio 句柄：`spawn` / `spawn_blocking` / `block_on` 都打在它上面。
+    ///
+    /// 本值是 `Send + Sync` 的——**本地队列不在它里面**（那是线程独占资源，
+    /// 见 [`crate::LocalScope`]）。
     handle_: tokio::runtime::Handle,
-    /// 本值自己的本地队列（本地投递与 `run_until` 的载体）。
-    #[cfg(feature = "local_scope")]
-    local_: Rc<tokio::task::LocalSet>,
 }
 
 /// 用当前 tokio 运行时上下文构造**全能力**（`Runtime<FULL>`）运行时值。
@@ -196,11 +193,7 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// assert_eq!(out, 7);
     /// ```
     pub fn with_handle(handle: tokio::runtime::Handle) -> Self {
-        Self {
-            handle_: handle,
-            #[cfg(feature = "local_scope")]
-            local_: Rc::new(tokio::task::LocalSet::new()),
-        }
+        Self { handle_: handle }
     }
 
     /// 复制一份把手：与本值共享同一个运行时句柄与同一条本地队列。
@@ -223,8 +216,6 @@ impl<const CAPS: usize> Runtime<CAPS> {
     pub fn retag<const OTHER: usize>(&self) -> Runtime<OTHER> {
         Runtime {
             handle_: self.handle_.clone(),
-            #[cfg(feature = "local_scope")]
-            local_: Rc::clone(&self.local_),
         }
     }
 
@@ -236,6 +227,44 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// 本值抓住的 tokio 句柄（escape hatch，便于做后端特有的事）。
     pub fn handle(&self) -> &tokio::runtime::Handle {
         &self.handle_
+    }
+}
+
+#[cfg(feature = "local_scope")]
+impl<const CAPS: usize> Runtime<CAPS>
+where
+    [(); CAPS]: abs_art::HasSpawnLocal,
+{
+    /// 交出本运行时的本地队列——一个**线程独占**的 [`LocalScope`]。
+    ///
+    /// # 为什么要求能力位
+    ///
+    /// 这是取得本地投递能力的**唯一入口**，而它要求 `CAPS` 含
+    /// [`SPAWN_LOCAL`]：想拿到作用域，就得先把「我要用本地
+    /// 投递」这件事写在类型上。声明位的价值是「**必须写下来**」，不是「写不下来就用不了」。
+    ///
+    /// # 线程独占
+    ///
+    /// tokio 的 `LocalSet` 绑定创建它的线程：作用域只能在**这条**线程上被驱动，
+    /// 且它是 `!Send`——想换线程就得在那边另取一个。队列不随运行时把手跨线程。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art::{SPAWN_LOCAL, TrLocalScope};
+    /// use abs_art_tokio::Runtime;
+    ///
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// let out = rt.block_on(async {
+    ///     let scope = Runtime::<{ SPAWN_LOCAL }>::current().local_scope();
+    ///     scope
+    ///         .run_until(async { scope.spawn_local(async { 7u32 }).await.unwrap() })
+    ///         .await
+    /// });
+    /// assert_eq!(out, 7);
+    /// ```
+    pub fn local_scope(&self) -> LocalScope {
+        LocalScope::with_handle(self.handle_.clone())
     }
 }
 
@@ -272,7 +301,10 @@ pub mod time;
 mod spawn_send;
 
 #[cfg(feature = "local_scope")]
-mod local_scope;
+pub mod local_scope;
+
+#[cfg(feature = "local_scope")]
+pub use local_scope::LocalScope;
 
 #[cfg(feature = "spawn_blocking")]
 mod spawn_blocking;

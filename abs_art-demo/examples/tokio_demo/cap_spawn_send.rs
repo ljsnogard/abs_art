@@ -5,17 +5,19 @@
 //! 1. **能力按位组合**：`BLOCK_ON | SPAWN_SEND` 是一个掩码，声明它 = 同时获得
 //!    `block_on` 与 `spawn` 两种能力（与业务库 `abs_art_demo::CapRt` 完全同构）；
 //! 2. **`TrJoinHandle` 的句柄抽象**：业务代码可以写出只依赖抽象 trait 的泛型
-//!    工具函数（`join_abstract`），完全不感知 tokio / compio / smol 的具体句柄
+//!    工具函数（`join_abstract_`），完全不感知 tokio / compio / smol 的具体句柄
 //!    类型——这是「抽象层真的可落地」的关键证明；
 //! 3. **任务 panic 的错误传播**：`JoinErr` 通过句柄的关联类型 `H::JoinErr`
 //!    （`core::error::Error`）传给调用方。
 //!
-//! # 值语义（v0.4）
+//! # 为什么这一组是 tokio 独有的
 //!
-//! `spawn` 是**值方法**：任务被投递到**这个值**抓住的运行时（tokio 的
-//! `Handle`）的全局工作队列上，而不是投到「当前线程恰好处于哪个运行时」。
-//! 同一个进程里存在两套运行时（例如测试二进制里 tokio 与 compio 并存）时，
-//! 「投到谁那里」由手上的值回答。`block_on` 同样打在这个值上。
+//! `TrSpawnSend` 的语义是「投递到**跨线程全局**工作队列」。compio 没有这样的
+//! 队列（它的 `spawn` 投的是本线程运行时的执行器，其 `Runtime` 内部全是 `Rc`、
+//! `!Send`），因此 **compio 的运行时值不实现 `TrSpawnSend`**：`rt.spawn(..)`
+//! 在 compio 上编译不过。compio 侧的反向演示与替代路径见
+//! `examples/compio_demo/cap_spawn_send.rs`。也就是说，本文件与 compio 的同名
+//! 文件**不再是逐字对应**——这正是抽象层如实表达后端差异的结果。
 //!
 //! # 可以做到
 //!
@@ -32,11 +34,11 @@
 //! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（`F: 'static` 约束，
 //!   对照 `cap_block_on` 里 `block_on` 可以借用——`TrSpawnSend` 没有放松
 //!   `'static`，见 `spawn_requires_static`）；
-//! - 在这里调 `spawn_local` → 编译错误：`CAPS` 里没有 `SPAWN_LOCAL` 位，
-//!   这个值不实现 `TrLocalScope`（本地投递的调用点在运行时值上，见
-//!   `spawn_local_requires_declaration` 与 `cap_spawn_local`）；
-//! - 句柄抽象只覆盖「等待/取结果」，不提供后端特有操作（如 tokio 的
-//!   `abort` 之外的取消语义）——能力边界之外的东西不在抽象层承诺内。
+//! - 在这里调 `spawn_local` → 编译错误：本地投递挂在**作用域**上，而本示例的
+//!   `CAPS` 里没有 `SPAWN_LOCAL` 位，连 `local_scope()` 都取不到（见
+//!   `local_scope_requires_declaration` 与 `spawn_local_not_on_runtime_value`）；
+//! - 句柄抽象只覆盖「等待/取结果」，不提供后端特有操作（如 tokio 的 `abort`
+//!   之外的取消语义）——能力边界之外的东西不在抽象层承诺内。
 
 use core::future::Future;
 
@@ -50,7 +52,7 @@ type SendRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;
 /// 只依赖抽象 trait `TrJoinHandle<T>`（它的 supertrait 保证 `H` 是一个
 /// `Future<Output = Result<T, H::JoinErr>>`），不感知任何后端句柄类型。
 /// 具体句柄类型（`abs_art_tokio::JoinHandle` 等）只在编译期单态化时出现。
-async fn join_abstract<H, T>(handle: H) -> Result<T, H::JoinErr>
+async fn join_abstract_<H, T>(handle: H) -> Result<T, H::JoinErr>
 where
     H: TrJoinHandle<T> + Future<Output = Result<T, H::JoinErr>>,
 {
@@ -60,25 +62,25 @@ where
 /// 业务函数：在这个运行时值上 spawn 三个任务并发计算，再聚合结果。
 ///
 /// 三个任务都投递到该值抓住的运行时的全局工作队列，由多个 worker 线程并行
-/// 执行；返回值通过抽象的 `join_abstract` 取回，调用点没有任何后端类型泄漏。
-async fn concurrent_sum(rt: &SendRt, x: i32) -> i32 {
+/// 执行；返回值通过抽象的 `join_abstract_` 取回，调用点没有任何后端类型泄漏。
+async fn concurrent_sum_(rt: &SendRt, x: i32) -> i32 {
     let h1 = rt.spawn(async move { x });
     let h2 = rt.spawn(async move { x * 2 });
     let h3 = rt.spawn(async move { x * 3 });
-    let a = join_abstract(h1).await.unwrap();
-    let b = join_abstract(h2).await.unwrap();
-    let c = join_abstract(h3).await.unwrap();
+    let a = join_abstract_(h1).await.unwrap();
+    let b = join_abstract_(h2).await.unwrap();
+    let c = join_abstract_(h3).await.unwrap();
     a + b + c
 }
 
 /// 业务函数：任务内部 panic 时，错误通过 `JoinErr` 传播给 await 方。
-async fn panic_propagates(rt: &SendRt) -> bool {
-    async fn boom() -> i32 {
+async fn panic_propagates_(rt: &SendRt) -> bool {
+    async fn boom_() -> i32 {
         panic!("任务爆炸");
     }
-    let h = rt.spawn(boom());
+    let h = rt.spawn(boom_());
     // JoinErr 是 core::error::Error：await 拿到的是 Result，而不是直接抛给进程
-    join_abstract(h).await.is_err()
+    join_abstract_(h).await.is_err()
 }
 
 fn main() {
@@ -90,8 +92,8 @@ fn main() {
     let (sum, panicked) = rt.block_on(async {
         // 在运行时上下文内构造值；块内用值上的 block_on 聚合 future
         let value = SendRt::current();
-        let sum = value.block_on(concurrent_sum(&value, 7));
-        let panicked = value.block_on(panic_propagates(&value));
+        let sum = value.block_on(concurrent_sum_(&value, 7));
+        let panicked = value.block_on(panic_propagates_(&value));
         (sum, panicked)
     });
 

@@ -25,9 +25,12 @@ pub async fn sleep(duration: Duration) {
 /// 在 `interval` 之后执行 `f`（本地版），返回 [`JoinHandle`]。
 ///
 /// `f` 会被投递到当前线程的 compio 运行时上运行。compio 的运行时是线程本地的，
-/// 因此这里**不要求** `Send`——与 [`TrSpawnSend::spawn`](abs_art::TrSpawnSend::spawn)
-/// 的 `Send` 约束形成对照：后者声明的是「可以跨线程投递」这一意图，而本函数
-/// 只声明「投到当前运行时」。
+/// 因此这里**不要求** `Send`——与需要真正跨线程的
+/// [`TrSpawnBlocking::spawn_blocking`](abs_art::TrSpawnBlocking::spawn_blocking) 形成
+/// 对照：后者声明 `F: Send + 'static`（闭包被交给阻塞线程池），而本函数只声明「投到当前
+/// 运行时」。这正是 compio 上 `spawn` 的唯一形态，因此本 crate **不**为它实现
+/// `TrSpawnSend`（理由见 crate 文档）；需要本地投递时用
+/// [`TrLocalScope::spawn_local`](abs_art::TrLocalScope::spawn_local)。
 pub fn delayed<X, F>(interval: Duration, f: F) -> JoinHandle<X>
 where
     X: 'static,

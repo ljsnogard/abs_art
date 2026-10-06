@@ -25,12 +25,16 @@
 //! 每个组合 crate 都把 `block_on` / `delay` / `spawn_send` / `local_scope` /
 //! `spawn_blocking` 五个功能做成 feature 开关，用户按需启用。
 //!
-//! # v0.4：能力收 `&self`，运行时**值化**
+//! # 本版：能力收 `&self`，运行时**值化**
 //!
-//! 运行时不再只是类型标签：它是有能力（并且可能需要）的**值**。业务库把
-//! `&R`（`R: TrSpawnSend + TrTime + …`）拿在手上，`spawn` / `delay` / `now` /
-//! `spawn_local` 都作用在**这一个值**上，因此「哪条本地队列、哪个时钟」不再可能
-//! 被指向别处。设计因果链见 `dev-notes/`。
+//! 运行时不再只是类型标签：它是有能力的**值**。业务库把 `&R`
+//! （`R: TrSpawnSend + TrTime + …`）拿在手上，`spawn` / `block_on` / `delay` /
+//! `now` 都作用在这一个值上，因此「哪个运行时、哪个时钟」不再可能被指向别处。
+//!
+//! **本地队列不在运行时值里**：它是**线程独占**的资源，由 [`TrLocalScope`] 承载
+//! （各后端的 `LocalScope`，经 `Runtime<CAPS>::local_scope()` 取得，且要求 `CAPS`
+//! 含 [`SPAWN_LOCAL`]）。计时与时刻属于运行时值；`spawn_local` / `run_until` 属于
+//! 作用域。为什么这样分、以及曾经合在一起的代价，见 [`runtime`] 模块文档。
 
 #![no_std]
 

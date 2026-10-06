@@ -16,8 +16,8 @@ where
     /// 这是 tokio 官方文档推荐的「在多线程运行时内同步等待 async 结果」的模式：
     /// 当前线程被阻塞的同时，运行时的其他任务仍能得到调度，即「不影响运行时调度」。
     ///
-    /// 本地队列（若本 feature 开启）由同一次 `block_on` 一并驱动——值化之后
-    /// 「阻塞等待」与「驱动本地队列」是同一件事。
+    /// 本方法**不涉及本地队列**（队列不归运行时值所有）：要「阻塞等待并驱动本地
+    /// 队列」，用作用域的 `TrLocalScope::block_on`。
     ///
     /// # Panics
     ///
@@ -27,17 +27,8 @@ where
     where
         F: Future,
     {
-        #[cfg(feature = "local_scope")]
-        {
-            let handle = self.handle_.clone();
-            let local = alloc::rc::Rc::clone(&self.local_);
-            tokio::task::block_in_place(move || handle.block_on(local.run_until(future)))
-        }
-        #[cfg(not(feature = "local_scope"))]
-        {
-            let handle = self.handle_.clone();
-            tokio::task::block_in_place(move || handle.block_on(future))
-        }
+        let handle = self.handle_.clone();
+        tokio::task::block_in_place(move || handle.block_on(future))
     }
 }
 
@@ -169,7 +160,7 @@ mod tests {
 
     /// 目的：验证在没有任何 tokio 运行时上下文的线程中**构造**运行时值会 panic
     /// ——值需要 `Handle::current()`，而该函数在没有环境运行时的情况下必然 panic。
-    /// 这固定了「运行时值必须来自某个真实运行时」的使用契约（v0.3 的 ZST 没有这条
+    /// 这固定了「运行时值必须来自某个真实运行时」的使用契约（原来的 ZST 没有这条
     /// 约束，代价是值不再指向任何具体运行时）。
     ///
     /// 实施策略：不创建也不进入任何 tokio 运行时，直接在测试线程中调用

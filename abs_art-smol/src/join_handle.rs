@@ -25,7 +25,7 @@ use crate::Runtime;
 /// - 全局任务（[`TrSpawnSend::spawn`](abs_art::TrSpawnSend::spawn)）由 smol 的
 ///   后台线程驱动，能否推进与句柄无关；
 /// - 本地任务（[`TrLocalScope::spawn_local`](abs_art::TrLocalScope::spawn_local)）
-///   由**运行时值**持有的 `LocalExecutor` 驱动，同样与句柄无关；
+///   由**作用域值**（`LocalScope`）持有的 `LocalExecutor` 驱动，同样与句柄无关；
 /// - `detach()` 因此回到「任务继续跑、只是不要结果」的正常语义。
 pub struct JoinHandle<T> {
     inner: smol::Task<T>,
@@ -43,8 +43,8 @@ where
     /// **不能**靠 drop 实现：async-task 的 `Task` 在 drop 时会 `set_canceled()`
     /// 取消任务——必须显式调用原生 `detach`。
     ///
-    /// 本地任务（`spawn_local` 投递）的执行器由运行时**值**持有，因此这里 detach
-    /// 之后任务照常推进（只要值还活着且仍被驱动）。
+    /// 本地任务（`spawn_local` 投递）的执行器由**作用域值**持有，因此这里 detach
+    /// 之后任务照常推进（只要作用域还活着且仍被驱动）。
     fn detach(self) {
         self.inner.detach();
     }
@@ -74,7 +74,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // smol 的 Task（async-task）是 Unpin，可以直接投影。
-        // 注意：这里**不**顺带驱动任何执行器——本地队列归运行时值所有。
+        // 注意：这里**不**顺带驱动任何执行器——本地队列归作用域值所有。
         let this = self.get_mut();
         Pin::new(&mut this.inner).poll(cx).map(Ok)
     }

@@ -5,19 +5,18 @@
 //!
 //! 1. **Tag 能力模型的最小形态**：`Runtime<CAPS>` 可以精确到「只要 `block_on`
 //!    一种能力」，声明之外的能力（`spawn` / `delay` / …）一律编译期拒绝；
-//! 2. **`TrBlockOn` 的 `'static` 约束放松**（提交 `19a6525` 把
-//!    `F: Future + 'static` 且 `F::Output: 'static` 放松为 `F: Future`）：
-//!    放松后 `block_on` 可以驱动**借用栈上数据**的 future、以及**返回借用引用**
-//!    的 future。compio 的 `Runtime::block_on`（`F: Future`，无 `'static`
-//!    约束）同样支持这种用法——本文件的业务函数与 tokio 组**逐字相同**，
-//!    证明放松带来的收益与后端无关。
+//! 2. **`TrBlockOn` 的 `'static` 约束放松**（`F: Future + 'static` 且
+//!    `F::Output: 'static` 放松为 `F: Future`）：放松后 `block_on` 可以驱动
+//!    **借用栈上数据**的 future、以及**返回借用引用**的 future。compio 的
+//!    `Runtime::block_on`（`F: Future`，无 `'static` 约束）同样支持这种用法——
+//!    本文件的业务函数与 tokio 组**逐字相同**，证明放松带来的收益与后端无关。
 //!
-//! # 值语义（v0.4）
+//! # 两件套里它只用了一半
 //!
-//! `block_on` 是**值方法**：它用**这个值**抓住的那份 compio 运行时来驱动 future
-//! （compio 的 `Runtime::block_on` 会自己 `enter` 出上下文），因此调用点不必
-//! 「恰好处于某个 compio 上下文内」。业务函数接收 `&BlockOnRt`，值由 `main`
-//! 在运行时上下文内用 `BlockOnRt::current()` 构造。
+//! `block_on` 属于**运行时值**（与「在哪个线程上调度」无关），本地队列属于
+//! **作用域值**。本示例只用前一半；作用域那一半见 `cap_spawn_local.rs`。
+//! compio 侧的 `block_on` 由值自己 `enter` 出上下文，因此调用点不必「恰好处于
+//! 某个 compio 上下文内」——这一点比 tokio 侧更宽松。
 //!
 //! # 可以做到
 //!
@@ -28,18 +27,18 @@
 //! # 不能做到
 //!
 //! - `spawn` / `delay` 等未声明能力 → **编译错误**；`spawn_local` 同样不可用，
-//!   原因有两层：`CAPS` 里没有 `SPAWN_LOCAL` 位（值因此不实现 `TrLocalScope`），
-//!   且本示例持有的值并没有被用来驱动本地队列
-//!   （负向演示见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
-//!   `compile_fail` 文档测试）；
-//! - 在没有任何 compio 运行时上下文的线程里**构造值**（`current()` 依赖
-//!   `Runtime::current()`，无上下文会 panic）——「构造需要上下文」是后端契约，
-//!   由集成方（本文件的 `main`）保证；要脱离上下文构造，须改用
+//!   而且拦得更早：`CAPS` 里没有 `SPAWN_LOCAL` 位 → `Runtime::local_scope()`
+//!   这个入口根本不存在 → 拿不到作用域值（负向演示见
+//!   [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
+//!   `compile_fail` 文档测试：`local_scope_requires_declaration`、
+//!   `spawn_local_not_on_runtime_value`）；
+//! - 在没有任何 compio 运行时上下文的线程里**构造值**（`current()` 依赖环境
+//!   运行时，无上下文会 panic）——「构造需要上下文」是后端契约，由集成方
+//!   （本文件的 `main`）保证；要脱离上下文构造，须改用
 //!   `Runtime::with_runtime(rt.clone())`；
-//! - `spawn` 借用非 `'static` 数据：`TrSpawnSend` **没有**放松 `'static`
-//!   约束（任务要脱离当前栈帧运行，借用必然不成立）——同一份"借用代码"，
-//!   `block_on` 能过、`spawn` 不能过，这正是「可以做到什么」与「不能做到什么」
-//!   的精确分界线。
+//! - `spawn` 借用非 `'static` 数据——注意这条在 compio 上还多一层：
+//!   compio 的运行时值**根本不实现** `TrSpawnSend`，所以 `spawn` 不是
+//!   「约束不满足」而是「方法不存在」（见 `cap_spawn_send.rs` 的反向演示）。
 
 use bridge_compio::{BLOCK_ON, Runtime, TrBlockOn};
 
@@ -54,7 +53,7 @@ type BlockOnRt = Runtime<{ BLOCK_ON }>;
 /// `data` 是局部变量，`async` 块捕获的是对它的借用，future 类型不是 `'static`。
 /// 旧约束（`F: Future + 'static`）下这段代码编译不过；放松为 `F: Future`
 /// 后即可编译。compio 的 `block_on` 底层同样没有 `'static` 要求。
-fn sum_stack_data(rt: &BlockOnRt) -> usize {
+fn sum_stack_data_(rt: &BlockOnRt) -> usize {
     let data = [1usize, 2, 3, 4];
     // 借用 data 的 future：非 'static，直接在 block_on 里消费掉
     rt.block_on(async { data.iter().sum() })
@@ -65,7 +64,7 @@ fn sum_stack_data(rt: &BlockOnRt) -> usize {
 /// 旧约束还要求 `<F as Future>::Output: 'static`，而这里 Output 是 `&[i32]`
 /// （借用 `data`），必然不满足 `'static`——放松后可以，只要 `data` 在
 /// `block_on` 返回之后仍然存活（本函数里确实如此）。
-fn slice_then_sum(rt: &BlockOnRt) -> i32 {
+fn slice_then_sum_(rt: &BlockOnRt) -> i32 {
     let data = [1i32, 2, 3];
     // Output = &[i32]，生命周期与 data 绑定；block_on 返回后 data 仍存活
     let slice = rt.block_on(async { data.as_slice() });
@@ -73,7 +72,7 @@ fn slice_then_sum(rt: &BlockOnRt) -> i32 {
 }
 
 /// 业务函数 C：`block_on` 一个借用局部 `String` 的 future（方法调用即借用）。
-fn str_len(rt: &BlockOnRt) -> usize {
+fn str_len_(rt: &BlockOnRt) -> usize {
     let s = String::from("hello");
     rt.block_on(async { s.len() })
 }
@@ -88,9 +87,9 @@ fn main() {
     // 内层才是值上的 TrBlockOn 调用。
     let (a, b, c) = rt.block_on(async {
         let value = BlockOnRt::current();
-        let a = sum_stack_data(&value);
-        let b = slice_then_sum(&value);
-        let c = str_len(&value);
+        let a = sum_stack_data_(&value);
+        let b = slice_then_sum_(&value);
+        let c = str_len_(&value);
         (a, b, c)
     });
 

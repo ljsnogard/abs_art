@@ -1,7 +1,7 @@
 //! `block_on`：阻塞当前线程等待 future 完成，同时不影响 compio 运行时的调度。
 //!
 //! 阻塞驱动入口是**值方法**：driving 用的是 `self` 抓住的那份 compio 运行时，
-//! 而不是「当前线程恰好进入了哪个运行时」。这是 v0.4 值化在 compio 上的直接收益
+//! 而不是「当前线程恰好进入了哪个运行时」。这是值化在 compio 上的直接收益
 //! ——`Runtime::block_on` 因此可以**在上下文之外**调用（它自己 `enter`）。
 
 use core::future::Future;
@@ -20,12 +20,14 @@ where
     /// 上下文），再循环执行「轮询 future → tick executor → 轮询驱动」。于是：
     ///
     /// - 调用点**不必**已处于 compio 运行时上下文内——上下文由本值提供；
-    /// - `future` 处于 pending 时，同一运行时上 `spawn` 的其他任务仍会被推进，
-    ///   即「不影响运行时调度」。
+    /// - `future` 处于 pending 时，同一运行时上的其他任务（含经
+    ///   [`TrLocalScope::spawn_local`](abs_art::TrLocalScope::spawn_local) 投递的本地
+    ///   任务）仍会被推进，即「不影响运行时调度」。
     ///
-    /// 本地队列（`local_scope` feature）由同一次 `block_on` 一并驱动：compio 的
-    /// 本地队列本来就归运行时所有、由运行时自己驱动，值化之后「阻塞等待」与
-    /// 「驱动本地队列」是同一件事。
+    /// 本地作用域（`local_scope` feature）由同一次 `block_on` 一并驱动：compio 的执行器
+    /// 队列本来就归运行时所有、由运行时自己 tick，而 [`LocalScope`](crate::LocalScope)
+    /// 钉住的正是这份运行时，因此「阻塞等待」与「驱动本地队列」是同一件事。
+    /// 需要显式指定驱动者时，也可以用 [`TrLocalScope::block_on`](abs_art::TrLocalScope::block_on)。
     ///
     /// # Panics
     ///
@@ -47,16 +49,9 @@ mod tests {
     //! 测试全部在真实的 compio 运行时上执行，验证值方法的返回值、对同运行时
     //! 任务的驱动、以及「值自带上下文」这一新契约。
 
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            mpsc,
-        },
-        thread,
-        time::Duration,
-    };
+    use std::{cell::Cell, rc::Rc, sync::mpsc, thread, time::Duration};
 
-    use abs_art::{BLOCK_ON, SPAWN_SEND, TrBlockOn, TrSpawnSend};
+    use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn, TrLocalScope};
     use compio::runtime::Runtime as CompioRuntime;
 
     use crate::Runtime;
@@ -82,19 +77,20 @@ mod tests {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证 `block_on` 阻塞等待期间，同运行时的其他任务仍会被调度——
-    /// 即「不影响运行时调度」的契约。
+    /// 目的：验证 `block_on` 阻塞等待期间，同运行时的其他任务仍会被调度——即「不影响
+    /// 运行时调度」的契约。
     ///
-    /// 实施策略：先经运行时值 `spawn` 一个后台任务（循环递增原子计数器后返回
-    /// 计数值），再用同一个值 `block_on` 去 await 该任务的句柄。compio 的
-    /// JoinHandle 自身不会内联执行任务，它只注册 waker 并等 executor 把任务跑完；
-    /// 因此若 `block_on` 没有在等待期间 tick executor，这个 await 永远不会完成。
+    /// 实施策略：先用**本地作用域** `spawn_local` 投递一个后台任务（循环递增
+    /// `Rc<Cell<usize>>` 计数器后返回计数值），再用同一个运行时值 `block_on` 去 await 该
+    /// 任务的句柄。compio 的 JoinHandle 自身不会内联执行任务，它只注册 waker 并等 executor
+    /// 把任务跑完；因此若 `block_on` 没有在等待期间 tick executor，这个 await 永远不会完成。
     ///
-    /// 通过依据：整个场景放在独立线程中执行，并用 `recv_timeout` 限制等待时间。
-    /// 若 10 秒内返回、句柄结果为 `Ok` 且返回值等于 1000，说明后台任务确实在
-    /// `block_on` 期间被驱动执行了；若超时或线程 panic 则失败。
+    /// 通过依据：整个场景放在独立线程中执行，并用 `recv_timeout` 限制等待时间。若 10 秒内
+    /// 返回、句柄结果为 `Ok` 且返回值等于 1000，说明后台任务确实在 `block_on` 期间被驱动
+    /// 执行了；若超时或线程 panic 则失败。计数器刻意用 `Rc<Cell<_>>`（`!Send`），一并钉住
+    /// 「本地任务不跨线程」。
     #[test]
-    fn block_on_drives_spawned_tasks() {
+    fn block_on_drives_local_tasks() {
         const TARGET: usize = 1000;
 
         let (tx, rx) = mpsc::channel();
@@ -103,18 +99,19 @@ mod tests {
 
             let result = rt.block_on(async {
                 let value = crate::current();
-                let counter = std::sync::Arc::new(AtomicUsize::new(0));
+                let scope = value.local_scope();
+                let counter = Rc::new(Cell::new(0usize));
                 let c = counter.clone();
 
-                let handle = value.spawn(async move {
+                let handle = scope.spawn_local(async move {
                     for _ in 0..TARGET {
-                        c.fetch_add(1, Ordering::Relaxed);
+                        c.set(c.get() + 1);
                     }
-                    c.load(Ordering::Relaxed)
+                    c.get()
                 });
 
                 let got = value.block_on(async { handle.await.unwrap() });
-                assert_eq!(counter.load(Ordering::Relaxed), TARGET);
+                assert_eq!(counter.get(), TARGET);
                 got
             });
 
@@ -150,7 +147,7 @@ mod tests {
     }
 
     /// 目的：验证运行时值可以在 compio 上下文**之外**构造，并独立 `block_on`
-    /// ——这是值化相对 v0.3（依赖 `with_current` 的环境式入口）新增的能力。
+    /// ——这是值化相对旧的环境式入口（依赖 `with_current`）新增的能力。
     ///
     /// 实施策略：先在当前线程（不在任何 compio 上下文内）`CompioRuntime::new()`，
     /// 用 `Runtime::with_runtime` 把它搬成运行时值，再直接调 `value.block_on`。
@@ -212,17 +209,17 @@ mod tests {
     /// `TrBlockOn`（编译期能力检查的正向用例）。
     ///
     /// 实施策略：在 compio 运行时上下文内，用
-    /// `Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current()` 取得运行时值，再通过
-    /// 值方法 `block_on` 驱动一个 future。
+    /// `Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current()` 取得运行时值，再通过值方法
+    /// `block_on` 驱动一个 future。
     ///
-    /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait impl
-    /// 有误，将无法编译。
+    /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait impl 有误，
+    /// 将无法编译。
     #[test]
     fn tagged_runtime_implements_block_on() {
         let rt = CompioRuntime::new().unwrap();
 
         let out = rt.block_on(async {
-            let value = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
+            let value = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
             value.block_on(async { 40 + 2 })
         });
         assert_eq!(out, 42);

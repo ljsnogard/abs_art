@@ -1,4 +1,4 @@
-//! `abs_art-smoke`：跨异步运行时的 `spawn_local` 行为契约冒烟测试。
+//! `abs_art-smoke`：跨异步运行时的本地投递与计时行为契约冒烟测试。
 //!
 //! # 这个 crate 解决什么问题
 //!
@@ -13,7 +13,7 @@
 //!
 //! 这些差异在「宿主怎么用句柄」这一点上会产生**可观测的行为差异**。本 crate 把
 //! `smux_v1` 真正依赖的那条契约固化成可执行的测试：同一份测试体
-//! （[`probe`] 模块，泛型于 `R: TrLocalScope` 并接收运行时**值** `&R`），
+//! （[`probe`] 模块，泛型于 `S: TrLocalScope` 并接收**作用域值** `&S`），
 //! 三种运行时的驱动骨架，一次运行给出 3 后端 × 4 用例的对比矩阵。
 //!
 //! # 被测契约
@@ -33,43 +33,53 @@
 //!
 //! # 实测结果
 //!
+//! `spawn_local` 契约矩阵（4 用例 × 3 后端）：
+//!
 //! | 用例 | tokio | compio | smol |
 //! | --- | --- | --- | --- |
 //! | A 句柄驱动 | ✅ | ✅ | ✅ |
-//! | B 运行时驱动（不 poll 句柄） | ✅ | ✅ | ✅ |
+//! | B 作用域驱动（不 poll 句柄） | ✅ | ✅ | ✅ |
 //! | C `detach` 后存活 | ✅ | ✅ | ✅ |
-//! | D `rt.block_on` 便捷入口 | ✅ | ✅ | ✅ |
+//! | D 作用域 `block_on` 入口 | ✅ | ✅ | ✅ |
 //!
-//! 这张全绿的表是**改造后**的结果。本 crate 最初建立时（v0.3 的类型级
+//! [`time_probe`] 契约矩阵（8 用例 × 3 后端）覆盖 `delay` 的时长与零时长、周期源的
+//! 首次与相位、`now()` 与 `delay` 的同源、`timeout` 的两条分支，以及「计时能力挂在
+//! 运行时值而不是作用域上」。
+//!
+//! 上面这张 `spawn_local` 表是**改造后**的结果。本 crate 最初建立时（类型级
 //! `spawn_local`）smol 的 B、C 两格是红的：那时执行器被塞在 `JoinHandle` 里，
 //! 句柄一旦 poll 不到或被 `detach()` 掉，本地任务就再也推不动。
 //!
-//! 转绿的关键是把本地队列做成**显式的值**——执行器 / `LocalSet` 由本地队列的
-//! 持有者持有，句柄只持有任务本身。本 crate 因此同时充当那次改造的**验收标准**
-//! 与回归防线。
+//! 转绿的关键是把本地队列做成**显式的值**——执行器 / `LocalSet` 由那个作用域值持有，
+//! 句柄只持有任务本身。本 crate 因此同时充当那次改造的**验收标准**与回归防线。
 //!
-//! # v0.4「运行时值化」对本 crate 的影响：只有调用形状
+//! # 本轮的形状：运行时**值** + 独立**作用域**
 //!
-//! v0.3 的本地队列持有者是一个**独立的作用域对象**（各后端的 `LocalScope`），
-//! 计时能力挂在**类型**上；v0.4 把两者都并进运行时**值**：
+//! 抽象层把两件事分开，本 crate 的骨架照此写成「造运行时值 → `rt.local_scope()` →
+//! 驱动作用域」：
 //!
-//! | | v0.3 | v0.4 |
+//! | 关切 | 宿主 | 调用形状 |
 //! | --- | --- | --- |
-//! | 全局投递 | `<Rt as TrSpawnSend>::spawn(f)` | `rt.spawn(f)` |
-//! | 本地投递 | `scope.spawn_local(f)` | `rt.spawn_local(f)` |
-//! | 异步驱动本地队列 | `scope.run_until(f)` | `rt.run_until(f)` |
-//! | 阻塞驱动本地队列 | `scope.block_on(f)`（`TrLocalScope`） | `rt.block_on(f)`（`TrBlockOn`） |
-//! | 睡眠 / 周期 / 超时 | `<Rt as TrTime>::delay(d)` … | `rt.delay(d)` … |
-//! | 取时刻 | 无（消费方自备时钟） | `rt.now()`（`TrClock`，与计时器同源） |
-//! | 探测体泛型 | `S: TrLocalScope` / `T: TrTime` | `R: TrLocalScope` / `R: TrTime`，收 `&R` |
+//! | 本地投递（`!Send`） | 作用域 `S: TrLocalScope` | `scope.spawn_local(f)` |
+//! | 异步驱动本地队列 | 作用域 | `scope.run_until(f)` |
+//! | 阻塞驱动本地队列 | 作用域 | `scope.block_on(f)`（`TrLocalScope::block_on`） |
+//! | 阻塞等待（**不**驱动队列） | 运行时值 | `rt.block_on(f)`（`TrBlockOn::block_on`） |
+//! | 睡眠 / 周期 / 超时 | 运行时值 | `rt.delay(d)` / `rt.interval(p)` / `rt.timeout(d, f)` |
+//! | 取时刻 | 运行时值 | `rt.now()`（`TrClock`，与计时器同源） |
 //!
-//! 上面四条 `spawn_local` 契约的**语义与判定标准一个字都没改**：改的只是「能力从
-//! 哪里来」。[`time_probe`] 那组则新增了一条 v0.3 无法表达的同源契约
-//! （[`time_probe::probe_clock_is_monotonic_and_shares_delay_source`]）。
+//! 两个 `block_on` 的分工是本轮要钉的重点：`scope.block_on(f)` 在等待期间**驱动本地
+//! 队列**，`rt.block_on(f)` 只等待。D 用例走前者；[`time_probe`] 的那组探针一个本地
+//! 任务也不投，因此走后者。
 //!
-//! 值化的一个直接后果：运行时值在 tokio / smol 上是 `!Send` 的（内部持
-//! `Rc<LocalSet>` / `Rc<LocalExecutor>`），因此只能在 [`harness::run_case`] 的
-//! 闭包**内部**构造。[`harness`] 模块文档对此有专门说明。
+//! 本地投递类探针因此泛型于**作用域** `S: TrLocalScope`，计时类探针泛型于**运行时值**
+//! `R: TrTime`——这正是本轮的分工。
+//!
+//! # compio 不实现 `TrSpawnSend`
+//!
+//! compio 的运行时是线程本地的，**没有**跨线程全局工作队列，因此抽象层删掉了它的
+//! `impl TrSpawnSend`。规则是：任何依赖 `TrSpawnSend` 的用例都不在 compio 这一列
+//! 出现，而不是假装它有。本 crate 的四条 `spawn_local` 契约只依赖 `TrLocalScope`
+//! （本地投递 + 本地驱动），所以在三个后端上**同等成立**，compio 的四格照常保留。
 //!
 //! # 为什么需要 [`harness::run_case`] 的超时
 //!

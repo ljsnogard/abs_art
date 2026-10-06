@@ -19,9 +19,12 @@ default = ["block_on", "delay", "spawn_send", "local_scope", "spawn_blocking"]
 # 五个功能开关：按需启用，互不影响
 block_on = []
 delay = ["join_handle"]
+# 本后端**不**提供「投递到跨线程全局队列」的能力：compio 的执行器是线程本地的。
+# 打开本 feature 只会带来一篇说明「为什么没有 `impl TrSpawnSend`」的文档模块
+# （含 compile_fail 文档测试），投递任务请用 local_scope 的 `spawn_local`。
 spawn_send = ["join_handle"]
-# 值化的本地作用域（`!Send` 任务 + 统一驱动入口）。
-# v0.3 起取代原来的类型级 `spawn_local` 能力位。
+# 线程独占的本地作用域（`!Send` 任务 + 投递与统一驱动入口），由
+# `Runtime::<CAPS>::local_scope()` 交出（要求 CAPS 含 `SPAWN_LOCAL`）。
 local_scope = ["join_handle"]
 spawn_blocking = ["join_handle"]
 

@@ -4,22 +4,28 @@
 //!
 //! 1. **`FULL` 掩码 = 全部五个能力位**：`BLOCK_ON | DELAY | SPAWN_SEND |
 //!    SPAWN_LOCAL | SPAWN_BLOCKING`，一个值同时拥有全部能力；
-//! 2. **四种能力位 + 一个声明位 + 本地投递协同**：同一份业务代码里交替使用
-//!    `spawn` / `delay` / `spawn_blocking` / `block_on`，本地投递经
-//!    `rt.spawn_local` + `rt.run_until` 完成（本地队列归**这个值**所有）；
+//! 2. **两件套协同**：同一份业务流程里交替使用值上的
+//!    `spawn` / `delay` / `spawn_blocking` / `block_on`，以及作用域上的
+//!    `spawn_local` / `run_until`；
 //! 3. **后端自省**：`rt.tag()`（固有方法）与 `rt.about()`（`TrAsyncRuntime`）
 //!    都能报告当前后端身份，集成方可据此做运行时自省 / 断言。
 //!
-//! # 值语义（v0.4）
+//! # 为什么必须是两件套
 //!
-//! `FULL` 现在是「这个**值**具备全部五种能力」：能力方法全部收 `&self`，
-//! 打在同一个值上。自省也不再是 `Runtime::tag()` 这种「问类型」的形式，而是
-//! `value.tag()` / `value.about()`——问的是**这个值**指向哪个运行时。
+//! `FULL` 值同时具备五种能力，但**本地队列不在值里**：`SPAWN_LOCAL` 位只让
+//! `Runtime::local_scope()` 可用，队列本身由交出的作用域值承载。于是本示例的
+//! 结构是：
+//!
+//! ```text
+//! value = FullRt::current()      // 运行时值：spawn / delay / spawn_blocking / block_on
+//! scope = value.local_scope()    // 作用域：spawn_local / run_until
+//! value.delay(..) 在 scope.run_until(..) 内部 —— 计时从值取、投递从作用域取
+//! ```
 //!
 //! # 可以做到
 //!
 //! - 一个 `Runtime<FULL>` 值同时满足全部能力 trait；
-//! - 在同一个 async 块中混用多种能力；
+//! - 在同一个 async 块中混用多种能力（值上的 + 作用域上的）；
 //! - 自省后端身份（`tag()` / `about()`）。
 //!
 //! # 不能做到
@@ -29,10 +35,10 @@
 //! - 能力在**运行期不能增减**：声明是编译期常量，`FULL` 与 `Runtime<0>` 之间
 //!   没有动态转换（`Runtime::retag` 只能换同后端的能力标签，不会改变运行期
 //!   指向的对象）；
-//! - **`SPAWN_LOCAL` 位与值缺一不可**：本地投递既要求声明（位），也要求手上
-//!   这个值真的持有并能驱动一条本地队列——两者各管一半，见 `cap_spawn_local`；
-//! - `block_on` 仍要求多线程运行时上下文（`block_in_place` 限制）——所以
-//!   本示例的多能力部分放在多线程运行时里执行。
+//! - **`SPAWN_LOCAL` 位与作用域缺一不可**：本地投递既要求声明（位），也要求真
+//!   的取到作用域值——两者各管一半，见 `cap_spawn_local`；
+//! - `block_on` 仍要求多线程运行时上下文（`block_in_place` 限制）——所以本示例
+//!   放在多线程运行时里执行。
 
 use std::time::Duration;
 
@@ -46,13 +52,13 @@ type FullRt = Runtime<FULL>;
 
 /// 多能力业务函数（A 部分）：spawn + delay + spawn_blocking。
 ///
-/// 不需要本地投递，也不需要额外的 `block_on`——外层 await 即可。
-async fn everything_except_local(rt: &FullRt) -> i32 {
+/// 三件都打在**运行时值**上，不需要作用域——外层 await 即可。
+async fn everything_except_local_(rt: &FullRt) -> i32 {
     // 1) spawn：跨线程任务
     let h = rt.spawn(async { 10 });
     let a = h.await.unwrap();
 
-    // 2) delay：时间驱动
+    // 2) delay：时间驱动（计时属于运行时值）
     rt.delay(Duration::from_millis(1)).await;
 
     // 3) spawn_blocking：阻塞池
@@ -62,44 +68,52 @@ async fn everything_except_local(rt: &FullRt) -> i32 {
     a + b // 10 + 20
 }
 
-/// 本地业务函数（B 部分）：在这个值上投递 `!Send` 的 `Rc` 任务。
+/// 本地业务函数（B 部分）：在**作用域**上投递 `!Send` 的 `Rc` 任务。
 ///
-/// **投递点与驱动点都在同一个值上**，这就是「本地队列并回运行时值」的直接
-/// 体现：不再需要额外的作用域参数。
-async fn local_part<R: TrLocalScope>(rt: &R) -> i32 {
+/// 只依赖 `S: TrLocalScope`：本地投递与运行时值无关，只与队列有关。
+async fn local_part_<S>(scope: &S) -> i32
+where
+    S: TrLocalScope,
+{
     let rc = std::rc::Rc::new(12i32);
     let rc2 = rc.clone();
-    let h = rt.spawn_local(async move { *rc2 });
+    let h = scope.spawn_local(async move { *rc2 });
     h.await.unwrap()
 }
 
 fn main() {
-    // ---- A 部分：多线程运行时（block_on 能力 + 多能力协同）----
+    // ---- 全能力协同：多线程运行时（block_on 能力 + 多能力协同）----
     // 多线程是因为 TrBlockOn 的 tokio 实现基于 block_in_place（见 cap_block_on）
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all() // delay 需要 time driver
         .build()
         .unwrap();
-    let out = rt.block_on(async {
+
+    let (multi, local) = rt.block_on(async {
         let value = FullRt::current();
 
         // ---- 自省：tag()（固有方法）与 about()（TrAsyncRuntime）----
         assert_eq!(value.tag(), RuntimeTag::Tokio);
         assert_eq!(value.about(), RuntimeTag::Tokio);
 
-        value.block_on(everything_except_local(&value))
-    });
-    assert_eq!(out, 30, "spawn(10) + spawn_blocking(20)");
+        // 作用域：本地队列的持有者与驱动点（取得入口被 SPAWN_LOCAL 位门控）
+        let scope = value.local_scope();
 
-    // ---- B 部分：本地投递（tokio 的本地队列由本值持有的 LocalSet 驱动）----
-    let rt2 = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    let out2 = rt2.block_on(async {
-        let value = FullRt::current();
-        value.run_until(local_part(&value)).await
-    });
-    assert_eq!(out2, 12, "Rc 任务返回值");
+        // A 部分：值上的多能力协同（内部还用了 value.block_on）
+        let multi = value.block_on(everything_except_local_(&value));
 
-    println!("cap_full OK: multi_caps={out}, local={out2}, tag=Tokio");
+        // B 部分：两件套同框——计时从值取、投递与驱动从作用域取
+        let local = scope
+            .run_until(async {
+                value.delay(Duration::from_millis(1)).await;
+                local_part_(&scope).await
+            })
+            .await;
+
+        (multi, local)
+    });
+
+    assert_eq!(multi, 30, "spawn(10) + spawn_blocking(20)");
+    assert_eq!(local, 12, "Rc 本地任务返回值");
+    println!("cap_full OK: multi_caps={multi}, local={local}, tag=Tokio");
 }

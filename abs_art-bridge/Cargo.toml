@@ -45,7 +45,7 @@ default-backend-smol = ["backend-smol"]
 # 显式指定：
 #
 #   abs_art-bridge = { ..., default-features = false, features = ["backend-smol"] }
-default = ["backend-tokio"]
+default = ["backend-compio"]
 
 # 仅测试用：桥接 crate 的烟雾测试需要一个真实运行时来驱动 tokio 后端。
 [dev-dependencies]

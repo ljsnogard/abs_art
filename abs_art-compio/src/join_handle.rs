@@ -18,7 +18,7 @@ pub struct JoinHandle<T> {
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 ///
-/// `about` 收 `&self`（v0.4 的值化形状）：身份由运行时值报告，而不是由类型报告。
+/// `about` 收 `&self`（值化后的形状）：身份由运行时值报告，而不是由类型报告。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
@@ -99,38 +99,36 @@ impl core::error::Error for JoinError {}
 mod tests {
     //! 针对 compio 后端 `TrJoinHandle::detach` 的单元测试。
 
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+    use std::{cell::Cell, rc::Rc};
 
-    use abs_art::{TrJoinHandle, TrSpawnSend};
+    use abs_art::{TrJoinHandle, TrLocalScope};
     use compio::runtime::Runtime as CompioRuntime;
 
-    /// 目的：验证 `detach` 后任务仍在 compio 运行时的工作队列里推进。
+    /// 目的：验证 `detach` 后任务仍在**运行时钉住的**本地队列里推进（compio 的队列由
+    /// 运行时自己 tick）。
     ///
-    /// 实施策略：经运行时值 `spawn` 一个设置 `AtomicBool` 的任务，`detach` 句柄
-    /// （不 await），再 `sleep` 让出——compio 的 `block_on` 在等待期间会 tick
-    /// 运行时队列，detach 的任务因此有机会执行并置位。
+    /// 实施策略：经运行时值交出本地作用域，用 `spawn_local` 投递一个置位 `Rc<Cell<bool>>`
+    /// 的任务，`detach` 句柄（不 await），再 `sleep` 让出——compio 的 `block_on` 在等待期间
+    /// 会 tick 运行时队列，detach 的任务因此有机会执行并置位。
     ///
-    /// 通过依据：标志在 `block_on` 返回前被置位——若 detach 实现错误地触发了取消
-    /// （compio `JoinHandle` 的 drop 会 cancel），标志永远不会置位。
+    /// 通过依据：标志在 `block_on` 返回前被置位——若 detach 实现错误地触发了取消（compio
+    /// `JoinHandle` 的 drop 会 cancel），标志永远不会置位。
     #[test]
     fn detach_keeps_task_running() {
         let rt = CompioRuntime::new().unwrap();
-        let flag = Arc::new(AtomicBool::new(false));
+        let flag = Rc::new(Cell::new(false));
         let f = flag.clone();
 
         rt.block_on(async {
-            let value = crate::current();
-            let handle = value.spawn(async move {
-                f.store(true, Ordering::SeqCst);
+            let scope = crate::current().local_scope();
+            let handle = scope.spawn_local(async move {
+                f.set(true);
             });
             handle.detach();
             // 让出：compio 的 block_on 在等待期间会驱动运行时队列
             compio::runtime::time::sleep(std::time::Duration::from_millis(10)).await;
         });
 
-        assert!(flag.load(Ordering::SeqCst), "detach 后任务未被调度执行");
+        assert!(flag.get(), "detach 后任务未被调度执行");
     }
 }

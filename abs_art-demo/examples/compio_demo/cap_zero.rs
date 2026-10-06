@@ -7,16 +7,10 @@
 //!    `Runtime<0>` 仍然是合法的、可构造的运行时值，可以放进类型签名——
 //!    「零能力」也是一种合法的能力声明；
 //! 2. **最小权限原则的极端形态**：`Runtime<0>` 不实现任何能力 trait，
-//!    调用任意能力（`block_on` / `spawn` / `delay` / …）都是编译错误——
-//!    Tag 严格模式把「没用到的能力」在编译期就挡住；
+//!    调用任意能力（`block_on` / `delay` / …）都是编译错误——Tag 严格模式把
+//!    「没用到的能力」在编译期就挡住；
 //! 3. **自省与能力解耦**：`TrAsyncRuntime::about()` 对所有 `CAPS` 实现，
 //!    因此零能力值仍能报告后端身份。
-//!
-//! # 值语义（v0.4）
-//!
-//! 零能力值同样是**值**：它由 `ZeroRt::current()` 在后端运行时上下文内构造，
-//! 抓住一份 compio 运行时，只是这个类型没有实现任何能力 trait。因此
-//! 「零能力」= 「拿到了运行时，但承诺一件事都不做」。
 //!
 //! 与 tokio 组唯一的不同：本文件断言 `about()` 报告的是 [`RuntimeTag::Compio`]，
 //! 证明「零能力值也能自省后端身份」这条性质在两个后端上一致成立。
@@ -29,9 +23,11 @@
 //!
 //! # 不能做到
 //!
-//! - 调用任何能力 trait（`block_on` / `spawn` / `delay` / …）→ **编译错误**
+//! - 调用任何能力 trait（`block_on` / `delay` / …）→ **编译错误**
 //!   （见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
 //!   `zero_caps_no_block_on`）；
+//! - 取本地作用域：`local_scope()` 要求 `CAPS` 含 `SPAWN_LOCAL`，零能力值自然
+//!   也拿不到（`local_scope_requires_declaration`）；
 //! - 在没有任何 compio 运行时上下文的线程里构造值 → **运行期 panic**（不是
 //!   编译错误）：`current()` 需要环境运行时，见 `strict_mode_check` 的
 //!   `no_context_construction`。

@@ -1,11 +1,15 @@
-//! `block_on`：阻塞当前线程等待 future 完成，同时驱动本值的本地队列。
+//! `block_on`：阻塞当前线程等待 future 完成——**只等待，不驱动本地队列**。
 //!
 //! smol 的 `block_on`（底层是 `async_io::block_on`）不依赖任何「环境运行时」：
 //! 它在当前线程上直接轮询 future 并驱动 async-io 的反应器，因此本入口**没有先决
 //! 条件**（tokio 的 `block_in_place` 那种「多线程运行时」前提在 smol 上不存在）。
 //!
-//! 值化之后，`block_on` 同时是**本地队列的阻塞驱动入口**：本值持有的
-//! `LocalExecutor` 与传入的 future 被同一个 `smol::block_on` 一起驱动。
+//! # 它不涉及本地队列
+//!
+//! 本地队列不归运行时值所有（smol 的值是零大小标记，见 `lib.rs`），所以本方法
+//! **只等待**，不驱动任何 `!Send` 任务的队列。要「阻塞等待并驱动本地队列」，用
+//! [`TrLocalScope::block_on`](abs_art::TrLocalScope::block_on)（即
+//! `scope.block_on(f)`，实现是 `smol::block_on(local.run(f))`）。
 
 use core::future::Future;
 
@@ -17,10 +21,11 @@ impl<const CAPS: usize> TrBlockOn for Runtime<CAPS>
 where
     [(); CAPS]: HasBlockOn,
 {
-    /// 阻塞当前线程直到 `future` 完成，期间持续驱动**本值**持有的本地队列。
+    /// 阻塞当前线程直到 `future` 完成。
     ///
-    /// smol 没有「环境运行时句柄」，因此这里不需要任何让渡动作，也不会堵塞
-    /// 全局执行器：全局任务由 smol 的后台线程驱动，与本调用无关。
+    /// smol 没有「环境运行时句柄」，因此这里不需要任何让渡动作：直接
+    /// `smol::block_on(future)`。全局执行器由 smol 的后台线程驱动；任何本地队列
+    /// 都不归本值所有，因此**不被本方法驱动**。
     ///
     /// # Panics
     ///
@@ -29,14 +34,7 @@ where
     where
         F: Future,
     {
-        #[cfg(feature = "local_scope")]
-        {
-            smol::block_on(self.local_.run(future))
-        }
-        #[cfg(not(feature = "local_scope"))]
-        {
-            smol::block_on(future)
-        }
+        smol::block_on(future)
     }
 }
 
@@ -155,24 +153,52 @@ mod tests {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证 `block_on` 会驱动**本值**持有的本地队列——值化之后「阻塞等待」
-    /// 与「驱动本地队列」是同一个动作，调用方不必再单独拿一个作用域值去驱动。
+    /// 目的：验证 `Runtime::block_on` **不驱动**本地作用域的队列——「只等待」与
+    /// 「驱动本地队列」两个入口分工明确（后者在 `LocalScope` 上）。
     ///
-    /// 手段：构造运行时值，用它的 `block_on` 驱动一个 `!Send`（捕获 `Rc`）的本地
-    /// 任务并 await 其句柄。
+    /// 手段：取运行时值与它的作用域；在作用域上投递一个置位 `Rc<Cell<bool>>` 的
+    /// 本地任务并 `detach()`（避免句柄 drop 取消任务）；先只调 `value.block_on(..)`
+    /// 让出若干次，断言标志仍为 false；最后用 `scope.block_on(..)` 驱动作用域，等
+    /// 标志置位。
     ///
-    /// 判定：取回 `6 * 7 == 42`；若 `block_on` 没有驱动本地队列，await 会永久挂起。
+    /// 判定：`value.block_on` 之后标志为 false（若它偷偷驱动了队列，这里就变 true
+    /// 而断言失败）；`scope.block_on` 之后标志为 true（若作用域没驱动队列，等待
+    /// 循环会因超出上限而断言失败）。
     #[cfg(feature = "local_scope")]
     #[test]
-    fn block_on_drives_the_values_local_queue() {
-        use abs_art::TrLocalScope;
+    fn block_on_does_not_drive_the_local_scope_queue() {
+        use std::{cell::Cell, rc::Rc};
+
+        use abs_art::{TrJoinHandle, TrLocalScope};
 
         let value = crate::current();
-        let out = value.block_on(async {
-            let rc = std::rc::Rc::new(6u32);
-            value.spawn_local(async move { *rc * 7 }).await.unwrap()
-        });
+        let scope = value.local_scope();
 
-        assert_eq!(out, 42);
+        let flag = Rc::new(Cell::new(false));
+        let task_flag = flag.clone();
+        let handle = scope.spawn_local(async move {
+            smol::future::yield_now().await;
+            task_flag.set(true);
+        });
+        handle.detach();
+
+        // 只让运行时值等待：它不驱动任何本地队列。
+        value.block_on(async {
+            for _ in 0..16 {
+                smol::future::yield_now().await;
+            }
+        });
+        assert!(!flag.get(), "`Runtime::block_on` 不该驱动本地队列");
+
+        // 由作用域驱动才推进。
+        let mut spins = 0u32;
+        scope.block_on(async {
+            while !flag.get() {
+                smol::future::yield_now().await;
+                spins += 1;
+                assert!(spins < 1_000_000, "作用域未能驱动本地任务");
+            }
+        });
+        assert!(flag.get());
     }
 }

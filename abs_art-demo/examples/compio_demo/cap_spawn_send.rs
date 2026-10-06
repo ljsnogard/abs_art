@@ -1,102 +1,134 @@
-//! # 设计意图
+//! # 设计意图：这是一次**反向演示**
 //!
-//! 用**组合能力** `Runtime<{ BLOCK_ON | SPAWN_SEND }>` 验证（compio 演示组，
-//! 与 `examples/tokio_demo/cap_spawn_send.rs` 一一对应）：
+//! 本文件与 `examples/tokio_demo/cap_spawn_send.rs` 一一对应，但结论相反：
+//! **compio 的运行时值不实现 `TrSpawnSend`**，所以这一组演示的不是「可以
+//! 跨线程投递」，而是「**不能**跨线程投递，以及应当改用什么」。
 //!
-//! 1. **能力按位组合**：`BLOCK_ON | SPAWN_SEND` 是一个掩码，声明它 = 同时获得
-//!    `block_on` 与 `spawn` 两种能力；
-//! 2. **`TrJoinHandle` 的句柄抽象**：业务代码可以写出只依赖抽象 trait 的泛型
-//!    工具函数（`join_abstract`），完全不感知 tokio / compio / smol 的具体
-//!    句柄类型——compio 组的句柄是 `compio::runtime::JoinHandle` 的薄包装，
-//!    但本文件的代码与 tokio 组**逐字相同**，正是「抽象层真的可落地」的证明；
-//! 3. **任务 panic 的错误传播**：`JoinErr` 通过句柄的关联类型 `H::JoinErr`
-//!    （`core::error::Error`）传给调用方（compio 的 `JoinError::Panicked`）。
+//! ## 要验证什么
 //!
-//! # 值语义（v0.4）
+//! 1. compio 的运行时值上**没有** `spawn`——`rt.spawn(..)` 是编译错误
+//!    （负向用例见
+//!    [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
+//!    `compio_runtime_has_no_spawn_send`）；
+//! 2. 替代路径是**本地作用域投递**：`Runtime::local_scope()` 取得作用域，
+//!    `scope.spawn_local(..)` 投递任务，`scope.run_until(..)` 驱动队列；
+//! 3. 同一份「投三个任务再聚合」的业务语义可以照常落地（本示例跑出
+//!    `7 + 14 + 21 == 42`，与 tokio 组 `concurrent_sum` 数值一致）；
+//! 4. 抽象的句柄契约仍然成立：本地句柄同样是 `TrJoinHandle`，panic 一样经
+//!    `JoinErr` 传播——**换的是投递路径，不是句柄抽象**。
 //!
-//! `spawn` / `block_on` 都是**值方法**：任务投递到**这个值**抓住的那份运行时
-//! 的工作队列上，等待也由这份运行时驱动。compio 的运行时是线程本地的
-//! （`!Send`），因此这里「全局队列」的实际形态是「本线程运行时的队列」——
-//! 值如实说出这条前提，而不是靠「当前线程恰好进入了哪个运行时」碰运气。
+//! ## 为什么 compio 必须失败在这里
 //!
-//! # 可以做到
+//! `TrSpawnSend` 的语义是「投递到**全局（跨线程）**工作队列」。compio 没有这样
+//! 的队列：
 //!
-//! - `spawn` 一个 `Send + 'static` 的 future 到当前 compio 运行时的工作队列；
-//! - `await` 返回的 `JoinHandle` 取回 `Result<T, JoinErr>`；
-//! - 多个任务投递后交错执行、聚合结果；
-//! - 任务 panic 时错误正常传播（`is_err()`），不会吞掉也不会上抛到进程。
+//! - `compio::runtime::Runtime` 内部是 `Rc<Executor>` + `Rc<RefCell<Proactor>>`，
+//!   本身就是 `!Send`，绑在创建它的线程上；
+//! - 它的 `spawn` 投的是**本线程**运行时的执行器队列，不存在可以被多个线程
+//!   共享、被其它线程窃取的工作队列。
 //!
-//! # 不能做到
+//! 因此 `abs_art-compio` 不为 `Runtime<CAPS>` 实现 `TrSpawnSend`。这不是遗漏，
+//! 而是「如实表达后端前提」：把 compio 也写成实现了 `TrSpawnSend`，就会让
+//! 业务代码误以为 `rt.spawn(..)` 意味着跨线程并行——那与事实相反。
 //!
-//! - **真正的跨线程并行**：compio 运行时是**线程本地**的（`!Send`，不能跨
-//!   线程发送），`spawn` 的任务都在当前线程的运行时上交错执行，不会像 tokio
-//!   那样分散到多个 worker 核——能力声明与句柄抽象两者一致，但底层调度
-//!   语义不同，这是抽象层不承诺的部分；
-//! - `spawn` **非 `Send`** 的 future（如捕获 `Rc`）→ 编译错误（`F: Send`
-//!   约束，见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo)
-//!   的 `spawn_requires_send`）——注意：compio 原生 `rt.spawn` 不要求 `Send`，
-//!   但抽象层的 `TrSpawnSend` 契约要求 `Send`，两个后端一致；
-//! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（对照 `cap_block_on`
-//!   里 `block_on` 可以借用，见 `spawn_requires_static`）；
-//! - 在这里调 `spawn_local` → 编译错误：`CAPS` 里没有 `SPAWN_LOCAL` 位，
-//!   这个值不实现 `TrLocalScope`（本地投递的调用点在运行时值上，见
-//!   `spawn_local_requires_declaration` 与 `cap_spawn_local`）。
+//! ## 可以做到
+//!
+//! - 用 `scope.spawn_local(..)` 投递任务、聚合结果；
+//! - 用只依赖 `TrJoinHandle` 的泛型工具函数等待句柄（后端无关）；
+//! - 任务 panic 时通过 `JoinErr` 拿到 `Err`，而不是炸掉进程；
+//! - `!Send` 数据（如 `Rc`）也能进本地队列——本地投递本来就不要求 `Send`。
+//!
+//! ## 不能做到
+//!
+//! - `rt.spawn(..)`：compio 的运行时值不实现 `TrSpawnSend`（编译错误）；
+//! - **跨线程并行**：这三个任务只能在**本线程**上交错执行，不会分散到多个
+//!   worker 核。这是 compio 的调度事实，抽象层不承诺、也没有办法在这一层
+//!   伪造；
+//! - 把任务「扔给别的线程」：运行时 `!Send`，队列绑线程；需要多线程时要
+//!   在各自的线程上各自建运行时；
+//! - 用 `SPAWN_SEND` 能力位换到 `spawn`：写了这一位也不会有 `spawn`——
+//!   能力位只表达业务侧「声明要什么」，能不能给由后端决定。
 
 use core::future::Future;
 
-use bridge_compio::{BLOCK_ON, Runtime, SPAWN_SEND, TrBlockOn, TrJoinHandle, TrSpawnSend};
+use bridge_compio::{FULL, Runtime, TrJoinHandle, TrLocalScope};
 
-/// 能力声明：`block_on` + `spawn_send`。
-type SendRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;
+/// 能力声明：写上 `FULL`（含 `SPAWN_SEND` 位）正是为了说明——
+/// **即便这一位写着，compio 的运行时值仍然没有 `spawn`**。
+///
+/// 本示例刻意用 `FULL` 而不是去掉 `SPAWN_SEND`：这样「失败原因是后端不实现该
+/// trait」与「失败原因是没写能力位」就被清楚地区分开。行为上真正用到的是
+/// `SPAWN_LOCAL`（取作用域）与 `DELAY`（无）——见 `main`。
+type FullRt = Runtime<{ FULL }>;
 
 /// 泛型工具函数：等待**任意后端**的 JoinHandle。
 ///
 /// 只依赖抽象 trait `TrJoinHandle<T>`（它的 supertrait 保证 `H` 是一个
-/// `Future<Output = Result<T, H::JoinErr>>`），不感知任何后端句柄类型。
-/// 具体句柄类型（`abs_art_compio::JoinHandle` 等）只在编译期单态化时出现。
-async fn join_abstract<H, T>(handle: H) -> Result<T, H::JoinErr>
+/// `Future<Output = Result<T, H::JoinErr>>`），不感知任何后端句柄类型。它与
+/// tokio 组同名函数逐字相同——句柄抽象这一层两后端共享，**投递路径**才是差异点。
+async fn join_abstract_<H, T>(handle: H) -> Result<T, H::JoinErr>
 where
     H: TrJoinHandle<T> + Future<Output = Result<T, H::JoinErr>>,
 {
     handle.await
 }
 
-/// 业务函数：在这个运行时值上 spawn 三个任务并发计算，再聚合结果。
-///
-/// compio 的任务在同一个线程本地运行时上交错执行；返回值通过抽象的
-/// `join_abstract` 取回，调用点没有任何后端类型泄漏。
-async fn concurrent_sum(rt: &SendRt, x: i32) -> i32 {
-    let h1 = rt.spawn(async move { x });
-    let h2 = rt.spawn(async move { x * 2 });
-    let h3 = rt.spawn(async move { x * 3 });
-    let a = join_abstract(h1).await.unwrap();
-    let b = join_abstract(h2).await.unwrap();
-    let c = join_abstract(h3).await.unwrap();
+/// 替代路径：用**本地作用域**投三个任务并聚合，等价于 tokio 组的
+/// `concurrent_sum`。
+async fn local_concurrent_sum_<S>(scope: &S, x: i32) -> i32
+where
+    S: TrLocalScope,
+{
+    // 这里本来会写 `rt.spawn(..)`；在 compio 上那条路不存在，改成 scope.spawn_local。
+    let h1 = scope.spawn_local(async move { x });
+    let h2 = scope.spawn_local(async move { x * 2 });
+    let h3 = scope.spawn_local(async move { x * 3 });
+    let a = join_abstract_(h1).await.unwrap();
+    let b = join_abstract_(h2).await.unwrap();
+    let c = join_abstract_(h3).await.unwrap();
     a + b + c
 }
 
-/// 业务函数：任务内部 panic 时，错误通过 `JoinErr` 传播给 await 方。
-async fn panic_propagates(rt: &SendRt) -> bool {
-    async fn boom() -> i32 {
+/// 替代路径下的 panic 传播：本地句柄同样把任务 panic 报成 `Err`。
+async fn local_panic_propagates_<S>(scope: &S) -> bool
+where
+    S: TrLocalScope,
+{
+    async fn boom_() -> i32 {
         panic!("任务爆炸");
     }
-    let h = rt.spawn(boom());
-    // compio 的 JoinError::Panicked 同样会被捕获为 Err，而不是炸掉进程
-    join_abstract(h).await.is_err()
+    let h = scope.spawn_local(boom_());
+    join_abstract_(h).await.is_err()
 }
 
 fn main() {
     let rt = compio::runtime::Runtime::new().unwrap();
 
     let (sum, panicked) = rt.block_on(async {
-        // 在运行时上下文内构造值；块内用值上的 block_on 聚合 future
-        let value = SendRt::current();
-        let sum = value.block_on(concurrent_sum(&value, 7));
-        let panicked = value.block_on(panic_propagates(&value));
+        // 运行时值：`FULL` 位掩码，但它在 compio 上不实现 TrSpawnSend。
+        let value = FullRt::current();
+
+        // 唯一可用的投递入口：由运行时值交出本地作用域。
+        let scope = value.local_scope();
+
+        // 注意：下面这行如果取消注释，会**编译失败**（E0599: no method named
+        // `spawn`；`TrSpawnSend` is not implemented for `Runtime<31>`）。
+        // 这正是本文件要钉住的事实。
+        // let _ = value.spawn(async { 1 });
+
+        let sum = scope
+            .run_until(local_concurrent_sum_(&scope, 7))
+            .await;
+        let panicked = scope
+            .run_until(local_panic_propagates_(&scope))
+            .await;
         (sum, panicked)
     });
 
-    assert_eq!(sum, 42, "7 + 7*2 + 7*3");
+    assert_eq!(sum, 42, "7 + 7*2 + 7*3（本地作用域投递）");
     assert!(panicked, "panic 任务必须通过 JoinErr 传播");
-    println!("compio cap_spawn_send OK: sum={sum}, join_err_propagates={panicked}");
+    println!(
+        "compio cap_spawn_send（反向演示）OK: sum={sum}, join_err_propagates={panicked}, \
+         跨线程 spawn 不可用"
+    );
 }

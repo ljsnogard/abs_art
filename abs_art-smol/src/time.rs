@@ -3,7 +3,7 @@
 //! 实现基于 smol 的 `Timer`（即 `async_io::Timer`，由 async-io 的进程级反应器
 //! 驱动）：
 //!
-//! - 一次性睡眠：[`TrDelay::Delay`] = `UnitFuture<smol::Timer>`（在 `delay.rs` 里给出）；
+//! - 一次性睡眠：`TrDelay::Delay` = `UnitFuture<smol::Timer>`（在 `delay.rs` 里给出）；
 //! - 时刻：[`TrClock::Instant`] = `std::time::Instant`——**与上面的睡眠同一时间
 //!   基准**，理由见下；
 //! - 周期源：[`Interval`]——**自建**，因为 `async_io::Timer::interval` 的首次 tick
@@ -29,7 +29,7 @@
 //!
 //! 更关键的是**同源**：async-io 的计时器内部就是按 `std::time::Instant` 计算的
 //! （`async_io::Timer::after(d)` 即 `Instant::now() + d`；async-io 源码里
-//! `use std::time::{Duration, Instant}`），而 [`TrDelay::Delay`] 正是那个
+//! `use std::time::{Duration, Instant}`），而 `TrDelay::Delay` 正是那个
 //! `smol::Timer` 的包装。于是本后端的 `now()` 与 `delay()` 走的是**同一个**时间
 //! 基准，`TrTime: TrDelay + TrClock` 这条结构性绑定在 smol 上是真的成立的，而不是
 //! 靠约定。要注入假时钟时，替换的应当是**整个运行时值**（同时实现 `TrDelay` 与

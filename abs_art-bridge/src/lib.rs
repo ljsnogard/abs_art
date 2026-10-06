@@ -18,12 +18,12 @@
 //!
 //! 裸名 [`Runtime`] 按 **cfg 优先级**解析（`backend-tokio` > `backend-compio` >
 //! `backend-smol`）；同时启用多个后端时，非默认的那些用**具名别名**
-//! [`TokioRuntime`] / [`CompioRuntime`] / [`SmolRuntime`] 取用。
+//! `TokioRuntime` / `CompioRuntime` / `SmolRuntime` 取用（按 feature 出现）。
 //! 一个都没启用时 `compile_error!`（fail fast）。
 //!
 //! # 业务代码用法
 //!
-//! v0.4 起运行时是**值**：先构造它，再在它上面调能力方法。
+//! 本版起运行时是**值**：先构造它，再在它上面调能力方法。
 //!
 //! ```no_run
 //! use abs_art_bridge::{BLOCK_ON, Runtime, SPAWN_SEND, TrBlockOn, TrSpawnSend};
@@ -37,15 +37,16 @@
 //! # });
 //! ```
 //!
-//! 本地投递（`!Send` 任务）不再是独立的作用域值，而是**运行时值自己**的能力：
+//! 本地投递（`!Send` 任务）需要一个**线程独占的作用域值**，由运行时值交出：
 //!
 //! ```no_run
-//! use abs_art_bridge::{FULL, Runtime, TrBlockOn, TrLocalScope};
+//! use abs_art_bridge::{FULL, Runtime, TrLocalScope};
 //!
 //! let rt = Runtime::<{ FULL }>::current();
-//! let out = rt.block_on(rt.run_until(async {
-//!     let rc = std::rc::Rc::new(1u32); // !Send：只有本地队列能承载
-//!     rt.spawn_local(async move { *rc }).await.unwrap()
+//! let scope = rt.local_scope();           // 要求 CAPS 含 SPAWN_LOCAL
+//! let out = scope.block_on(scope.run_until(async {
+//!     let rc = std::rc::Rc::new(1u32);    // !Send：只有本地队列能承载
+//!     scope.spawn_local(async move { *rc }).await.unwrap()
 //! }));
 //! # let _ = out;
 //! ```
@@ -85,6 +86,26 @@ pub use abs_art::{
 ))]
 pub use abs_art_tokio::Runtime;
 
+/// 当前**默认**后端交出的本地作用域类型（线程独占，`!Send`）。
+#[cfg(any(
+    all(
+        feature = "default-backend-tokio",
+        not(feature = "default-backend-compio"),
+        not(feature = "default-backend-smol"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        feature = "backend-tokio",
+        not(feature = "backend-compio"),
+        not(feature = "backend-smol"),
+    ),
+))]
+pub use abs_art_tokio::LocalScope;
+
 /// 当前**默认**后端提供的运行时类型（compio 版）。
 #[cfg(any(
     all(
@@ -105,7 +126,27 @@ pub use abs_art_tokio::Runtime;
 ))]
 pub use abs_art_compio::Runtime;
 
-/// 当前**默认**后端提供的运行时类型（smol 版）。
+/// 当前**默认**后端交出的本地作用域类型（线程独占，`!Send`）。
+#[cfg(any(
+    all(
+        feature = "default-backend-compio",
+        not(feature = "default-backend-tokio"),
+        not(feature = "default-backend-smol"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        not(feature = "backend-tokio"),
+        feature = "backend-compio",
+        not(feature = "backend-smol"),
+    ),
+))]
+pub use abs_art_compio::LocalScope;
+
+/// 当前**默认**后端提供的运行时类型（仅在未启用前两者时来自 smol）。
 #[cfg(any(
     all(
         feature = "default-backend-smol",
@@ -124,6 +165,26 @@ pub use abs_art_compio::Runtime;
     ),
 ))]
 pub use abs_art_smol::Runtime;
+
+/// 当前**默认**后端交出的本地作用域类型（线程独占，`!Send`）。
+#[cfg(any(
+    all(
+        feature = "default-backend-smol",
+        not(feature = "default-backend-tokio"),
+        not(feature = "default-backend-compio"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        not(feature = "backend-tokio"),
+        not(feature = "backend-compio"),
+        feature = "backend-smol",
+    ),
+))]
+pub use abs_art_smol::LocalScope;
 
 /// 当前**默认**后端的「用运行时上下文构造全能力值」入口。
 ///
@@ -187,6 +248,18 @@ pub use abs_art_compio::current;
     ),
 ))]
 pub use abs_art_smol::current;
+
+/// 具名别名：tokio 后端的本地作用域类型。
+#[cfg(feature = "backend-tokio")]
+pub use abs_art_tokio::LocalScope as TokioLocalScope;
+
+/// 具名别名：compio 后端的本地作用域类型。
+#[cfg(feature = "backend-compio")]
+pub use abs_art_compio::LocalScope as CompioLocalScope;
+
+/// 具名别名：smol 后端的本地作用域类型。
+#[cfg(feature = "backend-smol")]
+pub use abs_art_smol::LocalScope as SmolLocalScope;
 
 /// 具名别名：tokio 后端的运行时类型（只要 feature 开启就存在）。
 #[cfg(feature = "backend-tokio")]
@@ -255,11 +328,12 @@ mod tests_tokio_ {
 
     use super::*;
 
-    /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`Runtime` 确实解析为 tokio
-    /// 后端的**运行时值**，且能力位与本地投递机制可用。
+    /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`Runtime` 与 `LocalScope`
+    /// 确实解析为 tokio 后端的类型，且能力位与本地投递机制可用。
     ///
     /// 实施策略：在 tokio 运行时上下文内构造声明了 `BLOCK_ON | SPAWN_LOCAL` 的值，
-    /// 用 `block_on` 驱动一个本地任务，并比较 `tag()` 与抽象标签。
+    /// 由它交出本地作用域，再用作用域的 `block_on` 驱动一个 `!Send` 任务；
+    /// 同时比较 `tag()` 与抽象标签。
     ///
     /// 通过依据：`tag()` 等于 [`RuntimeTag::Tokio`]，且本地任务取回 42。
     #[test]
@@ -270,9 +344,10 @@ mod tests_tokio_ {
             let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
             assert_eq!(rt.tag(), RuntimeTag::Tokio);
 
-            rt.block_on(async {
+            let scope = rt.local_scope();
+            scope.block_on(async {
                 let rc = std::rc::Rc::new(6u32);
-                rt.spawn_local(async move { *rc * 7 }).await.unwrap()
+                scope.spawn_local(async move { *rc * 7 }).await.unwrap()
             })
         });
 

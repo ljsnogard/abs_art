@@ -4,96 +4,111 @@
 //! （compio 演示组，与 `examples/tokio_demo/cap_full.rs` 一一对应）：
 //!
 //! 1. **`FULL` 掩码 = 全部五个能力位**：`BLOCK_ON | DELAY | SPAWN_SEND |
-//!    SPAWN_LOCAL | SPAWN_BLOCKING`，一个值同时拥有全部能力；
-//! 2. **四种能力位 + 一个声明位 + 本地投递协同**：同一份业务代码里交替使用
-//!    `spawn` / `delay` / `spawn_blocking`，本地投递经 `rt.spawn_local` 完成；
+//!    SPAWN_LOCAL | SPAWN_BLOCKING`，一个值同时声明了全部能力；
+//! 2. **两件套协同**：值上做 `block_on` / `delay` / `spawn_blocking`，作用域上做
+//!    `spawn_local` / `run_until`——计时从值取、投递从作用域取；
 //! 3. **后端自省**：`rt.tag()`（固有方法）与 `rt.about()`（`TrAsyncRuntime`）
 //!    报告当前后端身份——compio 组断言的是 `RuntimeTag::Compio`，与 tokio 组的
 //!    `Tokio` 形成对照，证明自省机制真的能区分后端。
 //!
-//! # 值语义（v0.4）
+//! # 这里必须写清的一件事：`FULL` 在 compio 上**不含** `spawn`
 //!
-//! 能力方法全部收 `&self`，打在同一个运行时值上；自省也从「问类型」
-//! （`Runtime::tag()`）变成「问这个值」（`value.tag()` / `value.about()`）。
+//! 能力位只表达业务侧「声明要什么」，能不能给由后端决定。compio 没有跨线程
+//! 全局工作队列，因此它的运行时值**不实现** `TrSpawnSend`——即便位掩码写了
+//! `SPAWN_SEND`（`FULL` 含该位），`rt.spawn(..)` 依然编译不过。所以本示例：
+//!
+//! - **不**调用 `rt.spawn(..)`（调用即编译错误）；
+//! - 需要「投多个任务」时改用 `scope.spawn_local(..)`（见 `cap_spawn_send.rs`
+//!   的反向演示与 `abs_art_demo::local_three_tasks`）。
+//!
+//! 与之对照，tokio 组的 `cap_full` 里 `rt.spawn(..)` 是**可以**用的。同一个
+//! `FULL` 名字、同一个位掩码，两个后端能做的事不同——这正是抽象层如实表达的
+//! 后端差异，也是本文件必须把「不能做到什么」写清楚的原因。
 //!
 //! # 可以做到
 //!
-//! - 一个 `Runtime<FULL>` 值同时满足全部能力 trait；
-//! - 在同一个 async 块中混用多种能力；
+//! - 一个 `Runtime<FULL>` 值同时满足 `TrBlockOn` / `TrDelay` / `TrTime` /
+//!   `TrClock` / `TrSpawnBlocking` 与作用域侧能力；
+//! - 在同一个 async 块中混用多种能力（值上的 + 作用域上的）；
 //! - 自省后端身份（`tag()` / `about()`）。
 //!
 //! # 不能做到
 //!
-//! - `FULL` 不提供后端**特有 API**（tokio 的 `sync::Mutex`、compio 的 IOCP
-//!   事件、smol 的 `async_io` 设施等）——抽象层只承诺这几种能力，
-//!   超出即不承诺；
-//! - 能力在**运行期不能增减**：声明是编译期常量，`FULL` 与 `Runtime<0>`
-//!   之间没有动态转换；
-//! - **调度语义的后端差异**：tokio 组里 `block_on` 必须放进多线程运行时
-//!   （`block_in_place` 限制），本地投递还要额外持有一条 `LocalSet`；
-//!   compio 组没有这两条限制（运行时线程本地、队列归运行时自己所有，
-//!   `run_until` 即 future 本身），因此本文件用一个 `rt.block_on` 就完成全部
-//!   演示——「不能做到什么」随后端而变，这正是抽象层只承诺能力、不承诺调度
-//!   细节的体现。
-//!
-//! # 与 tokio 组的另一处对照：本地投递的载体
-//!
-//! tokio 组的 `spawn_local` 需要额外的 `LocalSet` 与显式 `run_until` 驱动；
-//! compio 的运行时本身就是线程本地的，`spawn` 与 `spawn_local` 是同一条队列、
-//! 同一个入口，`run_until` 原样返回 `future`。写法一致，代价不同——值如实
-//! 说出自己的前提。
+//! - `rt.spawn(..)`：compio 的运行时值不实现 `TrSpawnSend`（负向用例见
+//!   [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
+//!   `compio_runtime_has_no_spawn_send`）；
+//! - `FULL` 不提供后端**特有 API**（compio 的 IOCP 事件、tokio 的
+//!   `sync::Mutex`、smol 的 `async_io` 设施等）——抽象层只承诺这几种能力；
+//! - 能力在**运行期不能增减**：声明是编译期常量，`FULL` 与 `Runtime<0>` 之间
+//!   没有动态转换；
+//! - 跨线程并行：本地投递只在本线程交错执行（见 `cap_spawn_send.rs`）。
 
 use std::time::Duration;
 
 use bridge_compio::{
     FULL, Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
-    TrSpawnBlocking, TrSpawnSend,
+    TrSpawnBlocking,
 };
 
 /// FULL 能力声明（默认值）：也可以直接写 `Runtime`，默认参数就是 FULL。
 type FullRt = Runtime<FULL>;
 
-/// 多能力业务函数：spawn + delay + spawn_blocking + 本地投递协同。
+/// 多能力业务函数（A 部分）：**不含** `spawn`——compio 的运行时值不实现
+/// `TrSpawnSend`，所以这里只用 `delay` 与 `spawn_blocking`。
 ///
-/// compio 下没有 `LocalSet` / `block_in_place` 的限制，一个函数就能用完
-/// 全部能力（`block_on` 在 `main` 里作为外层驱动）。
-async fn everything(rt: &FullRt) -> i32 {
-    // 1) spawn：投递到本值抓住的运行时的当前工作队列
-    let h = rt.spawn(async { 10 });
-    let a = h.await.unwrap();
-
-    // 2) delay：时间驱动
+/// 这也解释了为什么本文件与 tokio 组的 `cap_full` 不是逐字对应：tokio 组能多
+/// 演示一项 `spawn`，compio 组不能。
+async fn everything_except_spawn_(rt: &FullRt) -> i32 {
+    // 1) delay：时间驱动（计时属于运行时值）
     rt.delay(Duration::from_millis(1)).await;
 
-    // 3) spawn_blocking：阻塞线程
+    // 2) spawn_blocking：阻塞池（三后端共有）
     let h = rt.spawn_blocking(|| 20);
     let b = h.await.unwrap();
 
-    // 4) 本地投递：!Send 的 Rc 任务（compio 的队列归运行时，与 spawn 同一条）
-    let c = {
-        let rc = std::rc::Rc::new(12i32);
-        let rc2 = rc.clone();
-        let h = rt.spawn_local(async move { *rc2 });
-        h.await.unwrap()
-    };
+    10 + b // 10 + 20
+}
 
-    a + b + c
+/// 本地业务函数（B 部分）：在**作用域**上投递 `!Send` 的 `Rc` 任务。
+async fn local_part_<S>(scope: &S) -> i32
+where
+    S: TrLocalScope,
+{
+    let rc = std::rc::Rc::new(12i32);
+    let rc2 = rc.clone();
+    let h = scope.spawn_local(async move { *rc2 });
+    h.await.unwrap()
 }
 
 fn main() {
     // ---- 全能力协同：compio 一个 rt.block_on 即可（队列归运行时自己驱动）----
     let rt = compio::runtime::Runtime::new().unwrap();
-    let out = rt.block_on(async {
+
+    let (multi, local) = rt.block_on(async {
         let value = FullRt::current();
 
         // ---- 自省：tag()（固有方法）与 about()（TrAsyncRuntime）----
         assert_eq!(value.tag(), RuntimeTag::Compio);
         assert_eq!(value.about(), RuntimeTag::Compio);
 
-        // 在同一个值上聚合业务 future：`block_on` 由这份运行时的值方法提供
-        value.block_on(everything(&value))
+        // 作用域：本地投递的宿主与驱动点（入口被 SPAWN_LOCAL 位门控）
+        let scope = value.local_scope();
+
+        // A 部分：值上的多能力协同（内部用 value.block_on 聚合）
+        let multi = value.block_on(everything_except_spawn_(&value));
+
+        // B 部分：两件套同框——计时从值取、投递与驱动从作用域取
+        let local = scope
+            .run_until(async {
+                value.delay(Duration::from_millis(1)).await;
+                local_part_(&scope).await
+            })
+            .await;
+
+        (multi, local)
     });
 
-    assert_eq!(out, 42, "spawn(10) + spawn_blocking(20) + Rc(12)");
-    println!("compio cap_full OK: all_caps={out}, tag=Compio");
+    assert_eq!(multi, 30, "10 + spawn_blocking(20)");
+    assert_eq!(local, 12, "Rc 本地任务返回值");
+    println!("compio cap_full OK: all_caps={multi}, local={local}, tag=Compio");
 }

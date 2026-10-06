@@ -9,10 +9,9 @@
 //!    调用任意能力（`block_on` / `spawn` / `delay` / …）都是编译错误——
 //!    Tag 严格模式把「没用到的能力」在编译期就挡住；
 //! 3. **自省与能力解耦**：`TrAsyncRuntime::about()` 对所有 `CAPS` 实现，
-//!    因此零能力值仍能报告后端身份；而 `tag()` 也是全 `CAPS` 的固有方法
-//!    （见下）。
+//!    因此零能力值仍能报告后端身份；而 `tag()` 也是全 `CAPS` 的固有方法。
 //!
-//! # 值语义（v0.4）
+//! # 构造仍然需要上下文
 //!
 //! 零能力值同样是**值**：它由 `ZeroRt::current()` 在后端运行时上下文内构造，
 //! 抓住一个 tokio 句柄，只是这个类型没有实现任何能力 trait。因此
@@ -29,6 +28,8 @@
 //! - 调用任何能力 trait（`block_on` / `spawn` / `delay` / …）→ **编译错误**
 //!   （见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
 //!   `zero_caps_no_block_on`）；
+//! - 取本地作用域：`local_scope()` 要求 `CAPS` 含 `SPAWN_LOCAL`，零能力值自然
+//!   也拿不到（`local_scope_requires_declaration`）；
 //! - 在没有任何运行时上下文的线程里构造值 → **运行期 panic**（不是编译错误）：
 //!   `current()` 需要 `Handle::current()`，见 `strict_mode_check` 的
 //!   `no_context_construction`。

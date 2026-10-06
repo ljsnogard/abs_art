@@ -21,7 +21,7 @@ block_on = []
 delay = ["join_handle"]
 spawn_send = ["join_handle"]
 # 值化的本地作用域（`!Send` 任务 + 统一驱动入口）。
-# v0.3 起取代原来的类型级 `spawn_local` 能力位。
+# 本版取代原来的类型级 `spawn_local` 能力位。
 local_scope = ["join_handle"]
 spawn_blocking = ["join_handle"]
 

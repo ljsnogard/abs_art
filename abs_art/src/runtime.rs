@@ -3,36 +3,50 @@
 //! 本模块不依赖任何异步运行时，所有 trait 的具体实现都在组合 crate
 //! （`abs_art-tokio` / `abs_art-compio` / `abs_art-smol`）中给出。
 //!
-//! # 为什么能力挂在**运行时值**上（v0.4 的核心改动）
+//! # 两个概念，两张皮：**运行时值**与**本地作用域**
 //!
-//! v0.3 的能力是**无 `self` 的关联函数**：`Runtime<CAPS>::delay(d)`、
-//! `<S as TrLocalScope>::spawn_local(f)`。那套形状的代价是「能力与环境分离」：
+//! 本版把运行时值化了：能力变成 `&self` 方法（`rt.spawn(..)` / `rt.delay(..)` /
+//! `rt.now()`）。但**本地队列不属于运行时值**——它是**线程独占**的资源，必须单独成为
+//! 一个值：[`TrLocalScope`]（各后端的 `LocalScope`）。
 //!
-//! - 计时能力挂在**类型**上，而本地队列挂在**另一个值**（各后端的 `LocalScope`）上，
-//!   于是同一个进程里存在两套运行时（测试二进制里 tokio 与 compio 并存）时，
-//!   「这次 `spawn_local` 投到哪条队列」「这次 `now()` 读的是谁的时钟」**没有类型
-//!   层面的绑定**，只能靠调用方自觉；
-//! - 调用点必须先**命名**运行时类型（或作用域值类型），库侧因此被迫穿一个类型参数，
-//!   而这个参数的唯一用途就是「指向那份环境」。
-//!
-//! v0.4 把运行时**值化**：能力变成 `&self` 方法，运行时的本地队列、计时源、
-//! 时刻源都由**这个值**提供。于是：
-//!
-//! | 问题 | v0.3 | v0.4 |
+//! | 关切 | 挂在哪 | 为什么 |
 //! | --- | --- | --- |
-//! | 这次 `spawn_local` 投到哪条队列？ | 由你手里那个 `LocalScope` 决定 | 由你手里这个**运行时值**决定 |
-//! | `delay` 与 `now` 同源吗？ | 一个是类型、一个可能是别处注入的值 | 同一个值，`TrTime: TrDelay + TrClock` |
-//! | 库侧要写什么？ | 类型参数 `Rt` + 作用域值 `S` | 只有一个运行时**值** `&R` |
+//! | 投递到全局工作队列（`spawn`） | 运行时**值** | 那份队列可以跨线程共享，值（如 tokio 的 `Handle`）正是它的把手 |
+//! | 阻塞等待 / 周期源 / 时刻 | 运行时**值** | 它们与「在哪个线程上调度」无关 |
+//! | 投递 `!Send` 任务（`spawn_local`） | [`TrLocalScope`] | 队列绑定**线程**：tokio 的 `LocalSet`、smol 的 `LocalExecutor` 都 `!Send`，必须由持有者驱动 |
 //!
-//! 代价是运行时值不再是「处处可写的 ZST」：它必须由持有环境的一方**构造出来**
-//! （tokio 的 `Handle` / `LocalSet`、smol 的 `LocalExecutor`），并像其它资源值一样
-//! 被传递。这是有意的——「哪个运行时」本来就是一个运行期事实，把它写进类型标签
-//! 只会让类型正确、调用点错误（见 v0.3 的 `SPAWN_LOCAL` 位讨论）。
+//! ## 为什么本地队列不能塞进运行时值（实测教训）
+//!
+//! 曾经把它并进运行时值，得到两个直接后果：
+//!
+//! 1. **值被迫 `!Send`**：tokio 的 `Handle` 本来是 `Send + Sync`，但一旦值里再装一个
+//!    `Rc<LocalSet>`，整个值就不能跨线程传了——「全局 spawn 的能力」被一个与它无关的
+//!    队列绑住。
+//! 2. **两种生命周期被绑死**：句柄可以共享、可以长期活着；队列必须绑定线程、必须由
+//!    持有者驱动。合成一个值之后，只能「值亡则队列亡」。
+//!
+//! 三个后端的真实形状并不一致（这也是「如实表达」的一部分）：
+//!
+//! | 后端 | 队列在哪 | 作用域是什么 |
+//! | --- | --- | --- |
+//! | tokio | 调用方的 `LocalSet`（与 `Handle` 可分离） | 持有 `Rc<LocalSet>` 的值 |
+//! | smol | 调用方的 `LocalExecutor`（可分离） | 持有 `Rc<LocalExecutor>` 的值 |
+//! | compio | **运行时实例自己的**执行器（不可分离） | 零大小标记：队列归当前运行时 |
+//!
+//! ## 作用域怎么来
+//!
+//! 只能从运行时值取得：`Runtime<CAPS>::local_scope()`，且要求 `CAPS` 含
+//! [`SPAWN_LOCAL`](crate::SPAWN_LOCAL)。这一步就是「声明 → 取得」的串联点，也保证了
+//! 作用域不会脱离运行时凭空出现（原设计那种「作用域与运行时无关」的串由此消失）。
+//!
+//! [`TrLocalScope`] **不**提供计时与时刻：[`TrDelay`] / [`TrClock`](crate::TrClock) /
+//! [`TrTime`](crate::TrTime) 都在
+//! 运行时值上——它们与本地调度无关，调用者从 `rt` 上取用即可。
 //!
 //! # 能力位仍然只管「声明」
 //!
-//! [`crate::caps`] 的位掩码机制不变：`Runtime<CAPS>` 只是**值类型的形状参数**，
-//! 掩码决定这个值实现了哪些能力 trait。值化不改变「想用就得写下来」这条设计意图。
+//! [`crate::caps`] 的位掩码机制不变：`Runtime<CAPS>` 是值类型的形状参数，掩码决定
+//! 这个值实现了哪些能力 trait、以及能不能经 `local_scope()` 取得作用域。
 
 use core::future::Future;
 
@@ -96,9 +110,10 @@ where
     ///
     /// # 已知限制
     ///
-    /// smol 后端的 `spawn_local` 任务：其本地执行器随运行时值存活（值的
-    /// `run_until` 驱动执行器），detach 消费句柄后执行器仍归运行时值所有，
-    /// 因此只要运行时值还活着且仍被驱动，本地任务就能继续推进。
+    /// smol 后端的 `spawn_local` 任务：其本地执行器随**作用域值**存活
+    /// （[`TrLocalScope::run_until`] / [`TrLocalScope::block_on`] 驱动执行器），
+    /// detach 消费句柄后执行器仍归作用域所有，因此只要作用域还活着且仍被驱动，
+    /// 本地任务就能继续推进。
     fn detach(self);
 }
 
@@ -178,17 +193,17 @@ pub trait TrSpawnBlocking {
         T: Send + 'static;
 }
 
-/// 让当前线程阻塞等待一个异步任务完成，同时驱动本运行时值拥有的本地队列。
+/// 让当前线程阻塞等待一个异步任务完成（不涉及本地队列）。
 ///
 /// 被等待的 future 类型 `F` 是 [`block_on`](Self::block_on) 的方法级泛型参数。
 /// 由于 `F` 不进 trait，`F` 不需要 `'static`——可以借用当前栈帧上的数据
 /// （见 `abs_art-demo` 的 `cap_block_on` 示例）。
 ///
-/// # 为什么它同时是「本地队列的阻塞驱动入口」
+/// # 它与作用域的 `block_on` 的分工
 ///
-/// v0.3 把「阻塞等待」挂在运行时类型上、把「驱动本地队列」挂在作用域值上，
-/// 于是调用方要先想清楚「我要驱动谁」。值化之后两者是同一件事：**这个运行时值
-/// 拥有的东西，由这次的 `block_on` 一起驱动**——本地队列、计时器都归它。
+/// 本地队列不归运行时值所有（见 [`TrLocalScope`]），所以本方法**只等待**，
+/// 不驱动任何 `!Send` 任务的队列。要「阻塞等待并驱动本地队列」，用
+/// [`TrLocalScope::block_on`]。
 ///
 /// # Examples
 ///
@@ -205,50 +220,63 @@ pub trait TrSpawnBlocking {
 /// }
 /// ```
 pub trait TrBlockOn {
-    /// 阻塞当前线程，等待 `f` 完成并返回其结果，期间持续驱动本值的本地队列。
+    /// 阻塞当前线程，等待 `f` 完成并返回其结果。
     fn block_on<F>(&self, f: F) -> F::Output
     where
         F: Future;
 }
 
-/// 值化的「本地作用域」：**运行时值自己**就是本地队列的持有者与驱动点。
+/// 本地作用域：**线程独占**的本地队列，由它负责投递与驱动 `!Send` 任务。
+///
+/// # 它为什么是独立的值
+///
+/// 本地队列绑定**线程**（tokio 的 `LocalSet`、smol 的 `LocalExecutor` 都 `!Send`），
+/// 与「运行时」是两件事：运行时把手可以跨线程共享、可以长期活着，而队列必须由持有者
+/// 在**创建它的线程**上驱动。因此本 trait 的宿主是一个独立的值，不并进运行时值
+/// （理由与实测见模块文档）。
+///
+/// compio 是例外中的例外：它的执行器就在运行时实例里、不可分离，所以它的作用域是
+/// **零大小**的标记——投递走的仍是当前运行时的队列，`run_until` 等价于直接 await。
 ///
 /// # 与能力位 [`SPAWN_LOCAL`](crate::SPAWN_LOCAL) 的分工
-///
-/// 本地投递仍然是「位 + 值」两件事，但**值的那一半换人了**：
 ///
 /// | | 回答的问题 | 载体 |
 /// | --- | --- | --- |
 /// | 能力位 `SPAWN_LOCAL` | 你**声明**了没有？ | `Runtime<CAPS>` 的类型级标记 |
-/// | 本 trait 的实现 | 你**拿到**了没有？ | 运行时值本身 |
+/// | 本 trait 的实现 | 你**拿到**了没有？ | 各后端的 `LocalScope` 值 |
 ///
-/// v0.3 的「值」是一个**独立的作用域对象**（各后端的 `LocalScope`），它可以脱离
-/// 运行时类型单独存在、单独传递、单独驱动；v0.4 把它并回运行时值，因为那条环境
-/// 前提（「此刻真的有本地队列，且有人驱动它」）本来就属于**这个运行时**，
-/// 不属于任何一个可以被复制来复制去的对象。
+/// 集成方经各后端的 `Runtime<CAPS>::local_scope()` 取得作用域，而该关联函数要求
+/// `CAPS` 含本位——于是「开始用本地投递」这个动作必然在代码里留下痕迹。
+///
+/// # 它**不**提供计时与时刻
+///
+/// [`TrDelay`] / [`TrClock`](crate::TrClock) / [`TrTime`](crate::TrTime)
+/// 都实现在**运行时值**上，因为它们与本地调度
+/// 无关；需要等待/时刻的代码写 `R: TrTime` 并从运行时值上调用。作用域只回答一个问题：
+/// 「`!Send` 任务投到哪、由谁驱动」。
 ///
 /// # 实现契约
 ///
-/// 1. [`spawn_local`](Self::spawn_local) 投递的任务，其推进**不得依赖
-///    `Handle` 被 poll**——只要运行时值还活着且仍被驱动，任务就应当持续运行；
-/// 2. [`TrJoinHandle::detach`] 之后任务**继续运行**：本地队列归运行时值所有；
-/// 3. [`run_until`](Self::run_until) 在等待传入 future 期间，必须持续驱动本地队列；
-/// 4. 阻塞驱动入口不在这里重复提供——它就是 [`TrBlockOn::block_on`]。
+/// 1. [`spawn_local`](Self::spawn_local) 投递的任务，其推进**不得依赖句柄被 poll**——
+///    只要作用域还活着且处于被驱动状态，任务就应当持续运行；
+/// 2. [`TrJoinHandle::detach`] 之后任务**继续运行**：队列归作用域所有；
+/// 3. [`run_until`](Self::run_until) / [`block_on`](Self::block_on) 在等待传入 future
+///    期间，必须持续驱动本地队列。
 ///
 /// # Examples
 ///
-/// 泛型库侧（不依赖任何后端，`R` 由最终二进制给出**值**）：
+/// 泛型库侧（不依赖任何后端，`S` 由最终二进制给出**值**）：
 ///
 /// ```rust
 /// use abs_art::TrLocalScope;
 ///
-/// async fn run_local<R>(rt: &R) -> u32
+/// async fn run_local<S>(scope: &S) -> u32
 /// where
-///     R: TrLocalScope,
+///     S: TrLocalScope,
 /// {
 ///     // 同一个约束即可投递多种（含调用点无法命名的）!Send future
 ///     let rc = std::rc::Rc::new(1u32);
-///     rt.spawn_local(async move { *rc }).await.unwrap()
+///     scope.spawn_local(async move { *rc }).await.unwrap()
 /// }
 /// ```
 pub trait TrLocalScope {
@@ -257,17 +285,39 @@ pub trait TrLocalScope {
     where
         T: 'static;
 
-    /// 把 `future` 投递到**本值**的本地队列，返回句柄。
+    /// 把 `future` 投递到**本作用域**的本地队列，返回句柄。
     fn spawn_local<F>(&self, future: F) -> Self::Handle<<F as Future>::Output>
     where
         F: Future + 'static,
         <F as Future>::Output: 'static;
 
-    /// 异步驱动入口：驱动**本值**的本地队列直到 `future` 完成。
+    /// 异步驱动入口：驱动本作用域的本地队列直到 `future` 完成。
     ///
     /// 返回的 future 需要放在「已处于该后端运行时上下文」的位置 await；
     /// 对 compio 这类运行时自己驱动队列的后端，它等价于直接 await `future`。
     fn run_until<F>(&self, future: F) -> impl Future<Output = <F as Future>::Output>
+    where
+        F: Future;
+
+    /// 阻塞驱动入口：阻塞当前线程，驱动本作用域的本地队列直到 `future` 完成。
+    ///
+    /// 各后端的先决条件与其 [`TrBlockOn`] 实现保持一致：
+    ///
+    /// - **tokio**：需要多线程运行时，且调用点已处于运行时上下文内
+    ///   （实现走 `block_in_place` + `Handle::block_on`）；
+    /// - **compio**：运行时自己 `enter`，无额外先决条件；
+    /// - **smol**：无先决条件。
+    ///
+    /// # Panics
+    ///
+    /// 不满足上述先决条件时 panic；具体由各后端实现决定，本 trait 不作统一承诺。
+    ///
+    /// # 它和 [`TrBlockOn::block_on`] 的区别
+    ///
+    /// 两者宿主类型不同（作用域 vs 运行时值），语义也不同：
+    /// `scope.block_on(f)` 在等待期间**驱动本地队列**；`rt.block_on(f)` 只等待，
+    /// 不涉及任何本地队列。
+    fn block_on<F>(&self, future: F) -> <F as Future>::Output
     where
         F: Future;
 }
