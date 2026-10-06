@@ -1,4 +1,4 @@
-//! `local_scope`：本地队列的**持有者与驱动点**——一个线程独占的作用域值。
+//! `local_scope`：**本线程那条本地队列的别名**——投递点与驱动点。
 //!
 //! # 为什么本地队列是这个形状
 //!
@@ -8,16 +8,31 @@
 //! 2. 本地队列归 `LocalSet` 的持有者所有，**必须由持有者驱动**；
 //! 3. `LocalSet` 是 `!Send` 的，绑定创建它的线程。
 //!
-//! 因此队列**不能**并进运行时值：运行时把手（`Handle`）是可跨线程共享、可长期活着的，
-//! 而队列是线程独占、必须由持有者驱动的——两种生命周期完全不同。曾经合并过一次，
+//! 因此队列**不能**并进运行时值：运行时把手（`Handle`）是可跨线程共享、可长期活着
+//! 的，而队列是线程独占、必须由持有者驱动的——两种生命周期完全不同。曾经合并过一次，
 //! 代价是 tokio 的运行时值被迫 `!Send`（详见 `abs_art::runtime` 模块文档）。
 //!
-//! 本模块提供 [`LocalScope`]：它就是那条队列的持有者，同时是投递点与驱动点。
+//! # 队列在 `thread_local!` 里，[`LocalScope`] 只是它的别名
 //!
-//! - 投递走方法版 `LocalSet::spawn_local`——它在 `LocalSet` 未运行时也能投递且
-//!   不 panic，正是「先建队列、后驱动」这个用法需要的语义；
-//! - 驱动走 [`TrLocalScope::run_until`]（异步）或 [`TrLocalScope::block_on`]（阻塞）；
-//! - 克隆作用域即共享**同一条**队列（`Rc<LocalSet>`）。
+//! 本后端把 `LocalSet` 放进**本线程的 `thread_local!`**，于是作用域退化为那条队列的
+//! 一个别名：
+//!
+//! - `Runtime::local_scope()` 在**同一线程上幂等**——调多少次都是同一条队列；
+//! - [`Clone`] 只增加一个别名（`Rc` 克隆），**不是**新建一条队列；
+//! - 它是 `!Send` 的：想在别的线程上投递，就到那条线程上另取一个作用域；
+//! - 队列寿命 = 线程寿命：线程退出时 `LocalSet` 一并销毁，未完成的任务随之消失。
+//!
+//! 「同一线程多条 `LocalSet`」这套 tokio 用法被**显式排除**：家族只对齐 compio 的
+//! 语义（见 [`TrLocalScope`]）。tokio 允许多个 `LocalSet`
+//! 并存这件事在本后端不暴露——`local_scope()` 永远交出同一条。
+//!
+//! # 只提供 `run_until`，没有阻塞入口
+//!
+//! tokio 的 `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止（`worker.rs` 的注释：
+//! 「in a LocalSet, where it is _not_ okay to block」），所以「阻塞等待并驱动本地
+//! 队列」在本后端根本立不住，抽象层因此把阻塞入口从 [`TrLocalScope`] 上删掉了。
+//! 需要阻塞等待时用运行时值的
+//! [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on)——但它**不驱动本地队列**。
 //!
 //! 取得路径只有一条：`Runtime<CAPS>::local_scope()`（要求 `CAPS` 含
 //! [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL)）——作用域不会脱离运行时凭空出现。
@@ -29,22 +44,33 @@ use abs_art::TrLocalScope;
 
 use crate::JoinHandle;
 
-/// tokio 后端的本地作用域：持有一条 `LocalSet`，以及抓住它的运行时句柄。
+std::thread_local! {
+    /// 本线程的本地队列：**全线程唯一**，[`LocalScope`] 只是它的别名。
+    ///
+    /// 惰性初始化（首次访问时建一条），线程退出时随 TLS 销毁。销毁时 `LocalSet`
+    /// 里未完成的任务被丢弃，这正是「队列寿命 = 线程寿命」的具体含义。
+    static LOCAL_QUEUE_: Rc<tokio::task::LocalSet> = Rc::new(tokio::task::LocalSet::new());
+}
+
+/// tokio 后端的本地作用域：**本线程那条 `LocalSet` 的别名**。
 ///
 /// # 线程独占
 ///
-/// 它是 `!Send` 的：`LocalSet` 绑定创建它的线程，只能在**这条**线程上被驱动。
-/// 需要在别的线程上投递本地任务时，在那边另取一个作用域
-/// （`Runtime::local_scope()`）。
+/// 它是 `!Send` 的：队列绑定本线程，`run_until` 只能在**这条**线程上驱动它。
+/// 需要在别的线程上投递本地任务时，在那边另取一个作用域（`Runtime::local_scope()`）。
 ///
-/// # 克隆
+/// # 克隆与「再取一次」是同一件事
 ///
-/// [`Clone`] 共享**同一条**队列（与同一条运行时把手）：克隆出来的两个作用域是
-/// 一个队列的两个把手，不是两条队列。
+/// [`Clone`] 只增加别名（同一个 `Rc<LocalSet>`、同一个运行时把手）。同一线程上再次
+/// 调 `Runtime::local_scope()` 得到的也是**同一条**队列——两者都**不会**新建队列。
 pub struct LocalScope {
-    /// 抓住的运行时句柄：`block_on` 要靠它在「已进入运行时」的位置驱动队列。
+    /// 取得本作用域时抓住的运行时句柄。
+    ///
+    /// `run_until` 不需要它（驱动 `LocalSet` 只需队列本身）；它服务于
+    /// `mock-clock` feature 下的 [`LocalScope::block_on_advancing`] 与 escape hatch
+    /// [`LocalScope::handle`]。
     handle_: tokio::runtime::Handle,
-    /// 本作用域的本地队列。
+    /// 本线程那条本地队列的别名（来自 `thread_local!`）。
     local_: Rc<tokio::task::LocalSet>,
 }
 
@@ -53,10 +79,12 @@ impl LocalScope {
     ///
     /// 刻意**不**公开：作用域只能从运行时值取得，这样它的来源与能力位声明
     /// （`Runtime<CAPS>::local_scope()` 要求 `SPAWN_LOCAL`）都是可追溯的。
+    ///
+    /// 队列本身来自本线程的 TLS——本函数**不**新建队列。
     pub(crate) fn with_handle(handle: tokio::runtime::Handle) -> Self {
         Self {
             handle_: handle,
-            local_: Rc::new(tokio::task::LocalSet::new()),
+            local_: LOCAL_QUEUE_.with(Rc::clone),
         }
     }
 
@@ -67,7 +95,7 @@ impl LocalScope {
 }
 
 impl Clone for LocalScope {
-    /// 共享同一条本地队列与同一条运行时把手。
+    /// 多加一个别名：同一条队列、同一个运行时把手。
     fn clone(&self) -> Self {
         Self {
             handle_: self.handle_.clone(),
@@ -90,11 +118,11 @@ impl TrLocalScope for LocalScope {
     where
         T: 'static;
 
-    /// 把 `future` 投递到本作用域的本地队列。
+    /// 把 `future` 投递到本线程的本地队列。
     ///
-    /// 队列随作用域存活，**不随任务句柄存活**——因此
-    /// [`TrJoinHandle::detach`](abs_art::TrJoinHandle::detach) 之后任务仍会被
-    /// 持续驱动，直到它自己结束。
+    /// 队列随**线程**存活，不随任务句柄存活——因此
+    /// [`TrJoinHandle::detach`](abs_art::TrJoinHandle::detach) 之后任务仍会被持续
+    /// 驱动，直到它自己结束（或线程退出）。
     fn spawn_local<F>(&self, future: F) -> Self::Handle<F::Output>
     where
         F: Future + 'static,
@@ -103,33 +131,16 @@ impl TrLocalScope for LocalScope {
         self.local_.spawn_local(future).into()
     }
 
-    /// 驱动本作用域的本地队列直到 `future` 完成。
+    /// 驱动本线程的本地队列直到 `future` 完成（`LocalSet::run_until`）。
     ///
     /// 需要外层已有一个 tokio 运行时在驱动本 future——典型写法是
-    /// `rt.block_on(scope.run_until(fut))`。
+    /// `rt.block_on(scope.run_until(fut))`（在运行时上下文之外）或
+    /// `scope.run_until(fut).await`（已在上下文内）。
     fn run_until<F>(&self, future: F) -> impl Future<Output = <F as Future>::Output>
     where
         F: Future,
     {
         self.local_.run_until(future)
-    }
-
-    /// 阻塞当前线程，驱动本地队列直到 `future` 完成。
-    ///
-    /// 先经 `block_in_place` 让渡当前 worker，再用本作用域抓住的句柄驱动
-    /// `run_until`——于是等待期间本地队列持续被推进。
-    ///
-    /// # Panics
-    ///
-    /// `block_in_place` 不允许在 current_thread 运行时内使用（没有其他 worker
-    /// 线程可以承接任务），此时会 panic。
-    fn block_on<F>(&self, future: F) -> <F as Future>::Output
-    where
-        F: Future,
-    {
-        let handle = self.handle_.clone();
-        let local = Rc::clone(&self.local_);
-        tokio::task::block_in_place(move || handle.block_on(local.run_until(future)))
     }
 }
 
@@ -143,6 +154,18 @@ mod tests {
 
     use crate::Runtime;
 
+    /// 在**独立线程**上运行用例体。
+    ///
+    /// 本地队列在本线程的 `thread_local!` 里，而 libtest 会复用线程
+    /// （`--test-threads=1` 时更是同一个线程跑完所有用例），所以只有换线程才能保证
+    /// 每个用例拿到一条干净的队列。用例体 panic 会经 `join` 传回，不影响判定。
+    fn in_fresh_thread_<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        std::thread::spawn(f).join().expect("用例线程 panic");
+    }
+
     /// 建一个 current_thread 的 tokio 运行时（契约只需要 time 驱动）。
     fn rt_() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -151,7 +174,7 @@ mod tests {
             .expect("建 tokio 运行时")
     }
 
-    /// 目的：验证运行时**值**是 `Send + Sync`——本地队列不再拖累它。
+    /// 目的：验证运行时**值**是 `Send + Sync`——本地队列不在它里面。
     ///
     /// 实施策略：编译期断言 `Runtime<FULL>: Send + Sync`。
     ///
@@ -163,7 +186,7 @@ mod tests {
         assert_send_sync::<Runtime<{ FULL }>>();
     }
 
-    /// 目的：验证 `run_until` 会驱动本作用域的本地队列，`!Send` 任务能跑完。
+    /// 目的：验证 `run_until` 会驱动本线程的本地队列，`!Send` 任务能跑完。
     ///
     /// 实施策略：在 tokio 运行时里由运行时值交出作用域，投递一个捕获 `Rc<u32>`
     /// 的本地任务，用 `run_until` 驱动并 await 其句柄。
@@ -171,54 +194,57 @@ mod tests {
     /// 通过依据：取回 `6 * 7 == 42`；若队列没有被驱动，await 会永久挂起。
     #[test]
     fn run_until_drives_local_tasks() {
-        let rt = rt_();
+        in_fresh_thread_(|| {
+            let rt = rt_();
 
-        let out = rt.block_on(async {
-            let scope = crate::current().local_scope();
-            scope
-                .run_until(async {
-                    let rc = Rc::new(6u32);
-                    let handle = scope.spawn_local(async move { *rc * 7 });
-                    handle.await.unwrap()
-                })
-                .await
+            let out = rt.block_on(async {
+                let scope = crate::current().local_scope();
+                scope
+                    .run_until(async {
+                        let rc = Rc::new(6u32);
+                        let handle = scope.spawn_local(async move { *rc * 7 });
+                        handle.await.unwrap()
+                    })
+                    .await
+            });
+
+            assert_eq!(out, 42);
         });
-
-        assert_eq!(out, 42);
     }
 
-    /// 目的：验证本地队列归作用域所有——`detach()` 消费句柄后任务仍继续运行。
+    /// 目的：验证本地队列的寿命与线程绑定——`detach()` 之后任务仍继续运行。
     ///
-    /// 实施策略：在多线程运行时上下文内用 `scope.block_on` 驱动；投递一个置位
-    /// `Rc<Cell<bool>>` 的本地任务后立即 `detach()`，再循环 `yield_now` 等标志置位。
+    /// 实施策略：在 `scope.run_until` 内投递一个置位 `Rc<Cell<bool>>` 的本地任务后
+    /// 立即 `detach()`，再循环 `yield_now` 等标志置位。
     ///
     /// 通过依据：标志在有限次让出内被置位；若实现把队列绑在句柄上（drop 即取消），
     /// 循环会因超出上限而断言失败。
     #[test]
     fn detach_keeps_local_task_running() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("建多线程运行时");
+        in_fresh_thread_(|| {
+            let rt = rt_();
 
-        rt.block_on(async {
-            let scope = crate::current().local_scope();
-            scope.block_on(async {
-                let flag = Rc::new(Cell::new(false));
-                let task_flag = Rc::clone(&flag);
+            rt.block_on(async {
+                let scope = crate::current().local_scope();
+                scope
+                    .run_until(async {
+                        let flag = Rc::new(Cell::new(false));
+                        let task_flag = Rc::clone(&flag);
 
-                let handle = scope.spawn_local(async move {
-                    tokio::task::yield_now().await;
-                    task_flag.set(true);
-                });
-                handle.detach();
+                        let handle = scope.spawn_local(async move {
+                            tokio::task::yield_now().await;
+                            task_flag.set(true);
+                        });
+                        handle.detach();
 
-                let mut spins = 0u32;
-                while !flag.get() {
-                    tokio::task::yield_now().await;
-                    spins += 1;
-                    assert!(spins < 1_000_000, "detach 后本地任务未被推进");
-                }
+                        let mut spins = 0u32;
+                        while !flag.get() {
+                            tokio::task::yield_now().await;
+                            spins += 1;
+                            assert!(spins < 1_000_000, "detach 后本地任务未被推进");
+                        }
+                    })
+                    .await;
             });
         });
     }
@@ -232,39 +258,66 @@ mod tests {
     /// 位上），本测试将无法编译。
     #[test]
     fn declared_cap_gives_usable_local_queue() {
-        let rt = rt_();
+        in_fresh_thread_(|| {
+            let rt = rt_();
 
-        let out = rt.block_on(async {
-            let scope = Runtime::<{ SPAWN_LOCAL }>::current().local_scope();
-            scope
-                .run_until(async {
-                    let rc = Rc::new(6u32);
-                    scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-                })
-                .await
+            let out = rt.block_on(async {
+                let scope = Runtime::<{ SPAWN_LOCAL }>::current().local_scope();
+                scope
+                    .run_until(async {
+                        let rc = Rc::new(6u32);
+                        scope.spawn_local(async move { *rc * 7 }).await.unwrap()
+                    })
+                    .await
+            });
+
+            assert_eq!(out, 42);
         });
-
-        assert_eq!(out, 42);
     }
 
-    /// 目的：验证同一个作用域的克隆共享**同一条**本地队列。
+    /// 目的：验证同一个作用域的克隆**共享同一条**本地队列。
     ///
     /// 实施策略：克隆作用域，用克隆体投递任务，用原作用域驱动，再 await 句柄。
     ///
-    /// 通过依据：取回 5——若两个克隆各有各的队列，驱动原作用域不会推进克隆体投递的
+    /// 通过依据：取回 5——若克隆各有各的队列，驱动原作用域不会推进克隆体投递的
     /// 任务，await 会挂起。
     #[test]
     fn clones_share_one_local_queue() {
-        let rt = rt_();
+        in_fresh_thread_(|| {
+            let rt = rt_();
 
-        let out = rt.block_on(async {
-            let scope = crate::current().local_scope();
-            let clone = scope.clone();
-            let handle = clone.spawn_local(async { 5u32 });
-            scope.run_until(handle).await.unwrap()
+            let out = rt.block_on(async {
+                let scope = crate::current().local_scope();
+                let clone = scope.clone();
+                let handle = clone.spawn_local(async { 5u32 });
+                scope.run_until(handle).await.unwrap()
+            });
+
+            assert_eq!(out, 5);
         });
+    }
 
-        assert_eq!(out, 5);
+    /// 目的：验证**本线程上多次 `local_scope()` 是同一条队列**（幂等的别名语义）。
+    ///
+    /// 实施策略：取两个作用域 A、B（**不**做 clone），用 A 投递、用 B 驱动。
+    ///
+    /// 通过依据：取回 5。修复前每个 `local_scope()` 会新建一条 `LocalSet`，此用例
+    /// 会永久挂起——它正是本次「队列进 `thread_local!`」改造的回归闸门。
+    #[test]
+    fn separate_calls_share_the_thread_local_queue() {
+        in_fresh_thread_(|| {
+            let rt = rt_();
+
+            let out = rt.block_on(async {
+                let value = crate::current();
+                let a = value.local_scope();
+                let b = value.local_scope();
+                let handle = a.spawn_local(async { 5u32 });
+                b.run_until(handle).await.unwrap()
+            });
+
+            assert_eq!(out, 5);
+        });
     }
 
     /// 目的：验证本地投递与 `delay` 各自挂在正确的宿主上（作用域管队列、运行时管计时）。
@@ -274,21 +327,23 @@ mod tests {
     /// 通过依据：耗时 ≥ 1ms；编译通过本身也证明作用域上没有 `delay`（它在 `rt` 上）。
     #[test]
     fn delay_comes_from_the_runtime_not_the_scope() {
-        let rt = rt_();
+        in_fresh_thread_(|| {
+            let rt = rt_();
 
-        let elapsed = rt.block_on(async {
-            let value = crate::current();
-            let scope = value.local_scope();
-            let started = std::time::Instant::now();
-            scope
-                .run_until(async {
-                    value.delay(Duration::from_millis(1)).await;
-                })
-                .await;
-            started.elapsed()
+            let elapsed = rt.block_on(async {
+                let value = crate::current();
+                let scope = value.local_scope();
+                let started = std::time::Instant::now();
+                scope
+                    .run_until(async {
+                        value.delay(Duration::from_millis(1)).await;
+                    })
+                    .await;
+                started.elapsed()
+            });
+
+            assert!(elapsed >= Duration::from_millis(1), "耗时为 {elapsed:?}");
         });
-
-        assert!(elapsed >= Duration::from_millis(1), "耗时为 {elapsed:?}");
     }
 
     /// 目的：验证 `TrLocalScope::Handle` 与 `crate::JoinHandle` 是同一个类型。
@@ -299,12 +354,14 @@ mod tests {
     /// 通过依据：编译通过即为通过（类型相等）。
     #[test]
     fn handle_type_is_the_shared_join_handle() {
-        fn take_handle_(_: crate::JoinHandle<u32>) {}
+        in_fresh_thread_(|| {
+            fn take_handle_(_: crate::JoinHandle<u32>) {}
 
-        let rt = rt_();
-        rt.block_on(async {
-            let scope = crate::current().local_scope();
-            take_handle_(scope.spawn_local(async { 1u32 }));
+            let rt = rt_();
+            rt.block_on(async {
+                let scope = crate::current().local_scope();
+                take_handle_(scope.spawn_local(async { 1u32 }));
+            });
         });
     }
 }
@@ -317,11 +374,19 @@ impl LocalScope {
     /// [`abs_art_mock_clock::ManualTime`] 的 `delay` / `interval` / `now`，驱动会在
     /// 「没有别的活可干」时把时钟推进到下一个到期时刻。
     ///
+    /// # 它**不属于** [`TrLocalScope`](abs_art::TrLocalScope)
+    ///
+    /// 这是本后端在 `mock-clock` feature 下提供的**固有方法**，不是作用域契约的一部分
+    /// ——抽象层的作用域只有 [`spawn_local`](abs_art::TrLocalScope::spawn_local) 与
+    /// [`run_until`](abs_art::TrLocalScope::run_until) 两条。它是「阻塞 + 驱动」的
+    /// 测试专用入口，名字里的 `block_on` 只描述它自己做的那次阻塞。
+    ///
     /// # 上下文
     ///
     /// - 在运行时上下文**之外**调用：直接 `Handle::block_on`；
     /// - 在上下文**之内**调用：走 `block_in_place` 让渡当前 worker，因此要求多线程运行时
-    ///   （`current_thread` 下该分支会 panic，与 tokio 的规定一致）。
+    ///   （`current_thread` 下该分支会 panic，与 tokio 的规定一致）。**不得**在
+    ///   `LocalSet` 的驱动栈内调用（tokio 禁止在 `LocalSet` 内 `block_in_place`）。
     ///
     /// # Panics
     ///
@@ -351,6 +416,14 @@ mod mock_clock_tests_ {
     use abs_art::{TrClock, TrDelay, TrLocalScope};
     use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
 
+    /// 在独立线程上运行（理由见 `tests::in_fresh_thread_`）。
+    fn in_fresh_thread_<F>(f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        std::thread::spawn(f).join().expect("用例线程 panic");
+    }
+
     /// 建一个多线程 tokio 运行时（`block_in_place` 分支需要）。
     fn rt_() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -368,26 +441,28 @@ mod mock_clock_tests_ {
     /// 通过依据：真实耗时 < 1s（虚拟时间没有被真的等），虚拟时刻恰好是 3600_000ms。
     #[test]
     fn virtual_hour_passes_instantly() {
-        let rt = rt_();
-        let (scope, value) = rt.block_on(async {
-            let value = crate::current();
-            let scope = value.local_scope();
-            (scope, value)
+        in_fresh_thread_(|| {
+            let rt = rt_();
+            let (scope, value) = rt.block_on(async {
+                let value = crate::current();
+                let scope = value.local_scope();
+                (scope, value)
+            });
+
+            let clock = ManualClock::new();
+            let timed = ManualTime::new(value, clock.clone());
+
+            let started = std::time::Instant::now();
+            let virtual_now = scope.block_on_advancing(&clock, async {
+                timed.delay(Duration::from_secs(3_600)).await;
+                timed.now()
+            });
+            let real = started.elapsed();
+
+            assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+            assert_eq!(virtual_now.as_millis(), 3_600_000);
+            assert_eq!(clock.now().as_millis(), 3_600_000);
         });
-
-        let clock = ManualClock::new();
-        let timed = ManualTime::new(value, clock.clone());
-
-        let started = std::time::Instant::now();
-        let virtual_now = scope.block_on_advancing(&clock, async {
-            timed.delay(Duration::from_secs(3_600)).await;
-            timed.now()
-        });
-        let real = started.elapsed();
-
-        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
-        assert_eq!(virtual_now.as_millis(), 3_600_000);
-        assert_eq!(clock.now().as_millis(), 3_600_000);
     }
 
     /// 目的：验证**投递到本地队列的任务**同样跑在虚拟时间上。
@@ -398,37 +473,39 @@ mod mock_clock_tests_ {
     /// 通过依据：取回 42，虚拟时刻推进到 1800_000ms，真实耗时 < 1s。
     #[test]
     fn spawned_local_task_runs_on_virtual_time() {
-        let rt = rt_();
-        let (scope, value) = rt.block_on(async {
-            let value = crate::current();
-            let scope = value.local_scope();
-            (scope, value)
-        });
+        in_fresh_thread_(|| {
+            let rt = rt_();
+            let (scope, value) = rt.block_on(async {
+                let value = crate::current();
+                let scope = value.local_scope();
+                (scope, value)
+            });
 
-        let clock = ManualClock::new();
-        let started = std::time::Instant::now();
-        // 作用域是 `Clone` 的（共享同一条队列），主体里用的是克隆体。
-        let scope_in_body = scope.clone();
-        let out = scope.block_on_advancing(&clock, {
-            let clock = clock.clone();
-            let inner = value;
-            async move {
-                let handle = scope_in_body.spawn_local({
-                    let clock = clock.clone();
-                    async move {
-                        let timed = ManualTime::new(inner, clock);
-                        timed.delay(Duration::from_secs(1_800)).await;
-                        42u32
-                    }
-                });
-                handle.await.unwrap()
-            }
-        });
-        let real = started.elapsed();
+            let clock = ManualClock::new();
+            let started = std::time::Instant::now();
+            // 作用域是 `Clone` 的（共享同一条队列），主体里用的是克隆体。
+            let scope_in_body = scope.clone();
+            let out = scope.block_on_advancing(&clock, {
+                let clock = clock.clone();
+                let inner = value;
+                async move {
+                    let handle = scope_in_body.spawn_local({
+                        let clock = clock.clone();
+                        async move {
+                            let timed = ManualTime::new(inner, clock);
+                            timed.delay(Duration::from_secs(1_800)).await;
+                            42u32
+                        }
+                    });
+                    handle.await.unwrap()
+                }
+            });
+            let real = started.elapsed();
 
-        assert_eq!(out, 42);
-        assert_eq!(clock.now().as_millis(), 1_800_000);
-        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
-        let _ = Rc::new(());
+            assert_eq!(out, 42);
+            assert_eq!(clock.now().as_millis(), 1_800_000);
+            assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+            let _ = Rc::new(());
+        });
     }
 }

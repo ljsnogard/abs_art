@@ -27,8 +27,10 @@ where
     ///
     /// 本地作用域（`local_scope` feature）由同一次 `block_on` 一并驱动：compio 的执行器
     /// 队列本来就归运行时所有、由运行时自己 tick，而 [`LocalScope`](crate::LocalScope)
-    /// 钉住的正是这份运行时，因此「阻塞等待」与「驱动本地队列」是同一件事。
-    /// 需要显式指定驱动者时，也可以用 [`TrLocalScope::block_on`](abs_art::TrLocalScope::block_on)。
+    /// 钉住的正是这份运行时，因此「阻塞等待」与「驱动本地队列」在 compio 上是同一件事。
+    /// 这与 tokio 形成对照——tokio 的 `block_in_place` 只让渡全局任务，且禁止在 `LocalSet`
+    /// 内调用；抽象层因此把「作用域的阻塞入口」整个删掉了，只留下
+    /// [`TrLocalScope::run_until`](abs_art::TrLocalScope::run_until)。
     ///
     /// # Panics
     ///

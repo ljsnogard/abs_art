@@ -8,18 +8,19 @@
 //! 2. 三组共享的断言函数，保证三个后端用的是**同一套判定标准**；
 //! 3. 每个用例一条独立测试，使得矩阵里哪个格子红了可以直接看出来。
 //!
-//! # 骨架：造运行时值 → `rt.local_scope()` → 驱动作用域
+//! # 骨架：造运行时值 → `rt.local_scope()` → 驱动**本线程**队列
 //!
-//! 本地队列是**线程独占**的资源，本轮抽象层把它放回一个独立的值
-//! [`TrLocalScope`]（各后端的 `LocalScope`），取得路径只有一条：
-//! `Runtime<CAPS>::local_scope()`（要求 `CAPS` 含 `SPAWN_LOCAL`）。于是三个后端的
-//! 骨架形状统一，差别只在最外层的驱动写法：
+//! 本地队列是**线程独占**的资源，抽象层用一个独立的值 [`TrLocalScope`]（各后端的
+//! `LocalScope`）表示它，取得路径只有一条：`Runtime<CAPS>::local_scope()`（要求
+//! `CAPS` 含 `SPAWN_LOCAL`）。三个后端交出的是**本线程那条队列的别名**：`Clone` 只是
+//! 多一个别名、同一线程上多次调用拿到同一条。于是三个后端的骨架形状统一，差别只在
+//! 最外层的驱动写法：
 //!
 //! ```text
-//! OUTER_DRIVER(rt.block_on(scope.run_until(user_future)))
-//!   ├─ tokio  : rt.block_on(..)      —— 作用域持有的 LocalSet 由 scope.run_until 驱动
+//! OUTER_DRIVER(scope.run_until(user_future))
+//!   ├─ tokio  : rt.block_on(..)      —— 驱动本线程的 LocalSet（返回的 future 需在上下文里 poll）
 //!   ├─ compio : rt.block_on(..)      —— scope.run_until 即 future 本身（队列归运行时）
-//!   └─ smol   : smol::block_on(..)   —— 作用域持有的 LocalExecutor 由 scope.run_until 驱动
+//!   └─ smol   : smol::block_on(..)   —— 驱动本线程的 LocalExecutor
 //! ```
 //!
 //! # 调用形状的三代对照（判定标准一字未改）
@@ -27,23 +28,25 @@
 //! | 步骤 | 原设计 | 中间版（全并进运行时值） | 本轮 |
 //! | --- | --- | --- | --- |
 //! | 造值 | `LocalScope::new()` | `abs_art_<backend>::current()` | `abs_art_<backend>::current()` |
-//! | 取作用域 | 不存在（值即作用域） | 不存在独立作用域 | `rt.local_scope()` |
+//! | 取作用域 | 不存在（值即作用域） | 不存在独立作用域 | `rt.local_scope()`（线程本地队列的别名） |
 //! | 本地投递 | `scope.spawn_local(..)` | `rt.spawn_local(..)` | `scope.spawn_local(..)` |
 //! | 异步驱动 | `scope.run_until(..)` | `rt.run_until(..)` | `scope.run_until(..)` |
-//! | 阻塞驱动（D） | `scope.block_on(..)`（旧 `TrLocalScope::block_on`） | `rt.block_on(..)`（`TrBlockOn`） | `scope.block_on(..)`（`TrLocalScope::block_on`） |
+//! | 阻塞驱动（D） | `scope.block_on(..)`（旧 `TrLocalScope::block_on`） | `rt.block_on(..)`（`TrBlockOn`） | `rt.block_on(scope.run_until(..))`：**阻塞在运行时值、驱动在作用域** |
 //!
-//! # D 用例：本轮调的是 `TrLocalScope::block_on`，不是 `TrBlockOn::block_on`
+//! # D 用例：阻塞与驱动是两件事，必须显式组合
 //!
-//! 两个「`block_on`」**分工不同**，本轮把这一点钉死：
+//! 本轮把「作用域的阻塞入口」**从 trait 上删掉了**：tokio 的 `block_in_place` 在
+//! `LocalSet` 内被 tokio 自己禁止（源码注释：「in a LocalSet, where it is _not_ okay
+//! to block」），于是「`scope.block_on(f)`」在三个后端上分别是 panic / 只驱动自己那条
+//! 队列 / 顺带驱动整个运行时——同一个名字三种承诺。抽象层只保留：
 //!
-//! - [`TrLocalScope::block_on`]（宿主是**作用域**）：阻塞当前线程，并且**驱动本地
-//!   队列**直到传入的 future 完成。D 用例走的是这一条。
-//! - [`TrBlockOn::block_on`]（宿主是**运行时值**）：只阻塞等待，**不驱动任何本地
-//!   队列**。它只该用来等「已经有人在推进的东西」。
+//! - [`TrLocalScope::run_until`]（宿主是**作用域**）：**驱动本线程队列**直到传入的
+//!   future 完成；
+//! - [`TrBlockOn::block_on`]（宿主是**运行时值**）：只阻塞等待，**不驱动任何本地队列**。
 //!
-//! 因此 D 用例的判定标准仍然是「把探针 A 的结果 `42` 交回上层」，但它的证据变了：
-//! 能交回 `42` 恰恰说明投递到本作用域的 `!Send` 任务在 `scope.block_on` 期间被驱动了
-//! ——这正是 `TrBlockOn::block_on` **做不到**的事。
+//! D 用例因此改为把两者**组合**起来用：`value.block_on(scope.run_until(probe))`。它的
+//! 判定标准不变（把探针 A 的 `42` 交回上层），但证据更精确：只 `value.block_on(probe)`
+//! 会挂起，正因为 `block_on` 自己不驱动队列。
 //!
 //! # `TrSpawnSend` 在矩阵里的位置：compio **不**实现它
 //!
@@ -53,12 +56,12 @@
 //! 的四格照样保留、照样要求通过；任何依赖 `TrSpawnSend` 的用例都**不该**出现在
 //! compio 这一列——本文件没有这样的用例，也不打算为了「凑齐矩阵」而伪造一个。
 
-// 两个 trait 都是**值方法**的调用前提：`scope.spawn_local` / `scope.run_until` /
-// `scope.block_on` 来自 `TrLocalScope`。值本身由各后端的 `current()` 交出，作用域由
-// `rt.local_scope()` 交出，具体类型名在这里都不需要出现。
+// 三个 trait 都是**值方法**的调用前提：`scope.spawn_local` / `scope.run_until` 来自
+// `TrLocalScope`，`value.block_on` 来自 `TrBlockOn`。作用域由 `rt.local_scope()` 交出；
+// D 用例外，其余用例连具体类型名都不需要出现。
 //
 // `TrSpawnSend` 只在最后那条「按后端分组」的类型级用例里出现。
-use abs_art::{TrLocalScope, TrSpawnSend};
+use abs_art::{TrBlockOn, TrLocalScope, TrSpawnSend};
 use abs_art_smoke::{
     LOOP_COUNT, LoopResult, expected_sum, probe_a_handle_driven, probe_b_runtime_driven,
     probe_c_detach_survives, run_case,
@@ -79,9 +82,9 @@ fn tokio_rt() -> Result<tokio::runtime::Runtime, String> {
 
 /// 创建 tokio 多线程运行时。
 ///
-/// `TrLocalScope::block_on`（D 用例）内部走 `block_in_place`，而 `block_in_place`
-/// 在 current_thread 运行时上会 panic，因此 D 用例必须用多线程运行时（与
-/// `abs_art-tokio` 的实现前提一致）。
+/// 保留给「必须在运行时上下文内构造值」的场景；D 用例现在走上下文外的
+/// `Runtime::with_handle`，不再需要它。
+#[allow(dead_code)]
 fn tokio_mt_rt() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -200,27 +203,28 @@ fn tokio_c_detach_survives() {
     );
 }
 
-/// 目的：验证 tokio 后端上 [`TrLocalScope::block_on`]——**作用域**的阻塞入口在等待
-/// 期间会驱动它自己的本地队列（注意：这不是 `TrBlockOn::block_on`，后者只等待、
-/// 不驱动队列）。
+/// 目的：验证 tokio 后端上「运行时值阻塞 + 作用域驱动队列」这套**可移植组合**
+/// ——阻塞由 [`TrBlockOn::block_on`] 提供，队列由 [`TrLocalScope::run_until`] 提供。
 ///
-/// 实施策略：用多线程运行时（`block_in_place` 的前提）的外层 `rt.block_on` 提供
-/// 运行时上下文，在其中经 `rt.local_scope()` 取作用域，再调
-/// `scope.block_on(probe_a_handle_driven(&scope))`。
+/// 实施策略：在运行时上下文**之外**用 `Runtime::with_handle` 造运行时值，经
+/// `local_scope()` 取作用域，再调 `value.block_on(scope.run_until(probe))`。
 ///
-/// 通过依据：交回 `42`。若 `TrLocalScope::block_on` 只等待而不驱动本地队列，投递
-/// 出去的 `!Send` 任务永远推不动，await 句柄会挂起，由 `run_case` 的超时判失败。
+/// 通过依据：交回 `42`。若组合里漏掉 `run_until`（只 `value.block_on(probe)`），投递
+/// 出去的 `!Send` 任务永远不会被推进，await 句柄会挂起，由 `run_case` 的超时判失败。
+///
+/// 说明：抽象层的作用域上**没有**阻塞入口（tokio 的 `block_in_place` 在 `LocalSet`
+/// 内被 tokio 自己禁止，三后端对「`scope.block_on`」给不出同一个承诺），因此原来那条
+/// 「作用域阻塞入口」用例已改为本用例。
 #[test]
-fn tokio_d_block_on_entry() {
+fn tokio_d_blocking_combo() {
     assert_a(
         "tokio",
-        run_case("tokio｜D 作用域 block_on", || {
-            let rt = tokio_mt_rt()?;
-            rt.block_on(async {
-                let value = abs_art_tokio::current();
-                let scope = value.local_scope();
-                scope.block_on(probe_a_handle_driven(&scope))
-            })
+        run_case("tokio｜D 阻塞组合", || {
+            let rt = tokio_rt()?;
+            let value =
+                abs_art_tokio::Runtime::<{ abs_art::FULL }>::with_handle(rt.handle().clone());
+            let scope = value.local_scope();
+            value.block_on(scope.run_until(probe_a_handle_driven(&scope)))
         }),
     );
 }
@@ -293,25 +297,24 @@ fn compio_c_detach_survives() {
     );
 }
 
-/// 目的：验证 compio 后端上 [`TrLocalScope::block_on`]——**作用域**的阻塞入口同样
-/// 能驱动它钉住的那条队列（compio 侧它落到 `self.rt_.block_on`，自己 `enter` 并 tick）。
+/// 目的：验证 compio 后端上「运行时值阻塞 + 作用域驱动队列」这条组合同样成立
+/// （compio 侧 `run_until` 即 future 本身，队列由运行时的 `block_on` 循环 tick）。
 ///
-/// 实施策略：在 compio 运行时上下文内用 `abs_art_compio::current()` 造值，经
-/// `rt.local_scope()` 取作用域，调 `scope.block_on(probe_a_handle_driven(&scope))`。
+/// 实施策略：在运行时上下文之外用 `Runtime::with_runtime` 造运行时值，经
+/// `local_scope()` 取作用域，调 `value.block_on(scope.run_until(probe))`。
 ///
-/// 通过依据：交回 `42`。注意本用例走的是 `TrLocalScope::block_on`，不是
-/// `TrBlockOn::block_on`。
+/// 通过依据：交回 `42`。compio 的 `block_on` 会 `enter` 出上下文并在循环里 tick
+/// 执行器，因此这条组合在 compio 上没有 tokio 那样的上下文/多线程前提。
 #[test]
-fn compio_d_block_on_entry() {
+fn compio_d_blocking_combo() {
     assert_a(
         "compio",
-        run_case("compio｜D 作用域 block_on", || {
+        run_case("compio｜D 阻塞组合", || {
             let rt = compio_rt()?;
-            rt.block_on(async {
-                let value = abs_art_compio::current();
-                let scope = value.local_scope();
-                scope.block_on(probe_a_handle_driven(&scope))
-            })
+            let value =
+                abs_art_compio::Runtime::<{ abs_art_compio::FULL }>::with_runtime(rt.clone());
+            let scope = value.local_scope();
+            value.block_on(scope.run_until(probe_a_handle_driven(&scope)))
         }),
     );
 }
@@ -376,23 +379,21 @@ fn smol_c_detach_survives() {
     );
 }
 
-/// 目的：验证 smol 后端上 [`TrLocalScope::block_on`]——**作用域**的阻塞入口驱动
-/// 它自己那条本地队列（smol 无任何先决条件）。
+/// 目的：验证 smol 后端上「运行时值阻塞 + 作用域驱动队列」这条组合同样成立
+/// （`scope.run_until` 负责驱动本线程队列，`smol::block_on` 负责阻塞）。
 ///
-/// 实施策略：经 `rt.local_scope()` 取作用域后直接调
-/// `scope.block_on(probe_a_handle_driven(&scope))`（内部为
-/// `smol::block_on(local.run(fut))`）。
+/// 实施策略：经 `rt.local_scope()` 取作用域后调
+/// `value.block_on(scope.run_until(probe))`（后者的 `block_on` 即 `smol::block_on`）。
 ///
-/// 通过依据：交回 `42`。注意本用例走的是 `TrLocalScope::block_on`，不是
-/// `TrBlockOn::block_on`。
+/// 通过依据：交回 `42`。若漏掉 `run_until`，投递出去的 `!Send` 任务不会被推进。
 #[test]
-fn smol_d_block_on_entry() {
+fn smol_d_blocking_combo() {
     assert_a(
         "smol",
-        run_case("smol｜D 作用域 block_on", || {
+        run_case("smol｜D 阻塞组合", || {
             let value = abs_art_smol::current();
             let scope = value.local_scope();
-            scope.block_on(probe_a_handle_driven(&scope))
+            value.block_on(scope.run_until(probe_a_handle_driven(&scope)))
         }),
     );
 }

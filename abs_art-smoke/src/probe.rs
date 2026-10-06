@@ -2,23 +2,23 @@
 //!
 //! 这里的三个函数都泛型于 `S: TrLocalScope`，接收的是**作用域值**（`&S`）——
 //! 本地队列是**线程独占**的资源，不并进运行时值：tokio 的 `LocalSet`、smol 的
-//! `LocalExecutor` 都 `!Send`，必须由持有者在创建它的线程上驱动；compio 的队列
-//! 虽然归运行时自带，抽象层也把它表达成一个独立的零大小作用域。于是「投递到哪条
-//! 本地队列、由谁驱动」由这个值回答，`spawn_local` / `run_until` / `block_on`
-//! 三个入口都在它身上。
+//! `LocalExecutor` 都 `!Send`，本版把两者都放进**本线程的 `thread_local!`**，作用域
+//! 只是那条队列的别名（`Clone` 即别名、同一线程上多次取得拿到同一条）；compio 的队列
+//! 归运行时自带，它天然满足同一套语义，是本版对齐的基准。于是「投递到哪条本地队列、
+//! 由谁驱动」由这个值回答，`spawn_local` / `run_until` 两个入口都在它身上。
 //!
 //! 作用域**不是**凭空出现的：只能经 `Runtime<CAPS>::local_scope()` 取得（要求
 //! `CAPS` 含 [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL)），这一步把「声明」与「取得」
-//! 串了起来。因此集成侧的骨架是「造运行时**值** → `rt.local_scope()` → 驱动作用域」。
+//! 串了起来。因此集成侧的骨架是「造运行时**值** → `rt.local_scope()` → 驱动本线程队列」。
 //!
 //! # 调用形状的三代对照（语义与判定标准一字未改）
 //!
-//! | 能力 | 原设计（类型级 + 独立作用域） | 中间版（全并进运行时值） | 本轮（值 + 独立作用域） |
+//! | 能力 | 原设计（类型级 + 独立作用域） | 中间版（全并进运行时值） | 本轮（值 + 线程本地队列的别名） |
 //! | --- | --- | --- | --- |
 //! | 本地投递 | `scope.spawn_local(f)` | `rt.spawn_local(f)` | `scope.spawn_local(f)` |
 //! | 异步驱动本地队列 | `scope.run_until(f)` | `rt.run_until(f)` | `scope.run_until(f)` |
-//! | 阻塞驱动本地队列 | `scope.block_on(f)` | `rt.block_on(f)`（`TrBlockOn`） | `scope.block_on(f)`（`TrLocalScope`） |
-//! | 取得作用域 | 后端自建 | 不存在独立作用域 | `rt.local_scope()` |
+//! | 阻塞驱动本地队列 | `scope.block_on(f)` | `rt.block_on(f)`（`TrBlockOn`） | **删掉了**：改为 `rt.block_on(scope.run_until(f))` 组合（阻塞在值、驱动在作用域） |
+//! | 取得作用域 | 后端自建 | 不存在独立作用域 | `rt.local_scope()`（本线程那条队列的别名） |
 //! | 时间（`delay` / `interval` / `now` / `timeout`） | 类型级 | 运行时值 | 运行时值（**不在作用域上**，见 [`crate::time_probe`]） |
 //!
 //! 计时与时刻**不**跟着作用域走：作用域只回答「`!Send` 任务投到哪、由谁驱动」。

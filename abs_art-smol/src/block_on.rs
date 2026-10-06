@@ -6,10 +6,12 @@
 //!
 //! # 它不涉及本地队列
 //!
-//! 本地队列不归运行时值所有（smol 的值是零大小标记，见 `lib.rs`），所以本方法
-//! **只等待**，不驱动任何 `!Send` 任务的队列。要「阻塞等待并驱动本地队列」，用
-//! [`TrLocalScope::block_on`](abs_art::TrLocalScope::block_on)（即
-//! `scope.block_on(f)`，实现是 `smol::block_on(local.run(f))`）。
+//! 本地队列不归运行时值所有（smol 的值是零大小标记，见 `lib.rs`；队列在本线程的
+//! `thread_local!` 里），所以本方法**只等待**，不驱动任何 `!Send` 任务的队列。
+//! 需要「等待期间继续驱动本线程的本地队列」时，把
+//! [`TrLocalScope::run_until`](abs_art::TrLocalScope::run_until) 交给一个正在跑的
+//! 驱动源去 await——例如 `smol::block_on(scope.run_until(f))`。抽象层的作用域上
+//! **没有**阻塞入口。
 
 use core::future::Future;
 
@@ -154,51 +156,55 @@ mod tests {
     }
 
     /// 目的：验证 `Runtime::block_on` **不驱动**本地作用域的队列——「只等待」与
-    /// 「驱动本地队列」两个入口分工明确（后者在 `LocalScope` 上）。
+    /// 「驱动本地队列」两个入口分工明确（后者在 `LocalScope` 的 `run_until` 上）。
     ///
-    /// 手段：取运行时值与它的作用域；在作用域上投递一个置位 `Rc<Cell<bool>>` 的
-    /// 本地任务并 `detach()`（避免句柄 drop 取消任务）；先只调 `value.block_on(..)`
-    /// 让出若干次，断言标志仍为 false；最后用 `scope.block_on(..)` 驱动作用域，等
-    /// 标志置位。
+    /// 手段：取运行时值与它的作用域（在**独立线程**上，保证拿到干净的线程本地队列）；
+    /// 在作用域上投递一个置位 `Rc<Cell<bool>>` 的本地任务并 `detach()`（避免句柄 drop
+    /// 取消任务）；先只调 `value.block_on(..)` 让出若干次，断言标志仍为 false；最后用
+    /// `smol::block_on(scope.run_until(..))` 驱动队列，等标志置位。
     ///
     /// 判定：`value.block_on` 之后标志为 false（若它偷偷驱动了队列，这里就变 true
-    /// 而断言失败）；`scope.block_on` 之后标志为 true（若作用域没驱动队列，等待
-    /// 循环会因超出上限而断言失败）。
+    /// 而断言失败）；`run_until` 之后标志为 true（若作用域没驱动队列，等待循环会因
+    /// 超出上限而断言失败）。
     #[cfg(feature = "local_scope")]
     #[test]
     fn block_on_does_not_drive_the_local_scope_queue() {
-        use std::{cell::Cell, rc::Rc};
+        std::thread::spawn(|| {
+            use std::{cell::Cell, rc::Rc};
 
-        use abs_art::{TrJoinHandle, TrLocalScope};
+            use abs_art::{TrJoinHandle, TrLocalScope};
 
-        let value = crate::current();
-        let scope = value.local_scope();
+            let value = crate::current();
+            let scope = value.local_scope();
 
-        let flag = Rc::new(Cell::new(false));
-        let task_flag = flag.clone();
-        let handle = scope.spawn_local(async move {
-            smol::future::yield_now().await;
-            task_flag.set(true);
-        });
-        handle.detach();
-
-        // 只让运行时值等待：它不驱动任何本地队列。
-        value.block_on(async {
-            for _ in 0..16 {
+            let flag = Rc::new(Cell::new(false));
+            let task_flag = flag.clone();
+            let handle = scope.spawn_local(async move {
                 smol::future::yield_now().await;
-            }
-        });
-        assert!(!flag.get(), "`Runtime::block_on` 不该驱动本地队列");
+                task_flag.set(true);
+            });
+            handle.detach();
 
-        // 由作用域驱动才推进。
-        let mut spins = 0u32;
-        scope.block_on(async {
-            while !flag.get() {
-                smol::future::yield_now().await;
-                spins += 1;
-                assert!(spins < 1_000_000, "作用域未能驱动本地任务");
-            }
-        });
-        assert!(flag.get());
+            // 只让运行时值等待：它不驱动任何本地队列。
+            value.block_on(async {
+                for _ in 0..16 {
+                    smol::future::yield_now().await;
+                }
+            });
+            assert!(!flag.get(), "`Runtime::block_on` 不该驱动本地队列");
+
+            // 由作用域的 `run_until` 驱动才推进。
+            let mut spins = 0u32;
+            smol::block_on(scope.run_until(async {
+                while !flag.get() {
+                    smol::future::yield_now().await;
+                    spins += 1;
+                    assert!(spins < 1_000_000, "作用域未能驱动本地任务");
+                }
+            }));
+            assert!(flag.get());
+        })
+        .join()
+        .expect("用例线程 panic");
     }
 }

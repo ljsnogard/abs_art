@@ -5,7 +5,7 @@
 //! - `block_on`：阻塞等待一个 future 完成（**不**驱动本地队列，见下）；
 //! - `delay`：睡眠 / 延迟执行，以及计时能力（[`TrClock`] / [`TrTime`]）；
 //! - `spawn_send`：投递任务到进程级全局工作队列；
-//! - `local_scope`：本地的 `!Send` 队列（[`LocalScope`]，投递 + 驱动）；
+//! - `local_scope`：**本线程那条本地队列**的别名（`!Send` 任务 + 统一驱动入口）；
 //! - `spawn_blocking`：投递阻塞函数到进程级阻塞线程池。
 //!
 //! 所有实现都基于基础 crate [`abs_art`] 中的 trait。
@@ -22,12 +22,12 @@
 //!   与**能力位声明**（`Runtime<CAPS>` 决定这个类型实现了哪些能力 trait）。
 //!
 //! **本地队列是另一件事**：`!Send` 任务要投到「哪条队列、由谁驱动」，答案由
-//! [`Runtime::local_scope()`] 交出的 [`LocalScope`] 回答。那条队列是**调用方创建、
-//! 调用方驱动的独立对象**，与运行时值互不归属：
+//! [`Runtime::local_scope()`] 交出的 [`LocalScope`] 回答。队列在**本线程的
+//! `thread_local!`** 里，作用域只是它的一个别名：
 //!
-//! - `spawn_local` / `run_until` / `block_on`（阻塞驱动）都在 [`LocalScope`] 上；
+//! - `spawn_local` / `run_until` 都在 [`LocalScope`] 上（**没有**阻塞驱动入口）；
 //! - 取得作用域要先把「我要用本地投递」写在类型上：`Runtime<CAPS>::local_scope()`
-//!   要求 `CAPS` 含 [`SPAWN_LOCAL`]；
+//!   要求 `CAPS` 含 [`SPAWN_LOCAL`]；同一线程上多次取得是**同一条**队列；
 //! - [`Runtime::block_on`](abs_art::TrBlockOn::block_on) **只等待、不驱动**任何本地
 //!   队列。
 //!
@@ -45,8 +45,8 @@
 //! 3. **全局并发度由环境变量 `SMOL_THREADS` 决定**（缺省 1 个后台线程），它是进程
 //!    级配置，不是本值的能力。
 //!
-//! 需要「队列随作用域走」的隔离语义时用 [`TrLocalScope::spawn_local`]——那才是
-//! [`LocalScope`] 真正拥有的队列。
+//! 需要「投到本线程、与全局队列隔离」的语义时用 [`TrLocalScope::spawn_local`]——它
+//! 投到本线程那条本地队列上，与进程级全局执行器互不干扰。
 //!
 //! ## 值钉住了什么（如实表）
 //!
@@ -55,10 +55,11 @@
 //! | `spawn` | `smol::spawn` 的进程级全局执行器（`OnceCell`） | **不能**（见上） |
 //! | `spawn_blocking` | `blocking` 的进程级线程池 | **不能**（进程级资源） |
 //! | `delay` / `now` / `interval` | async-io 的**进程级反应器**；值提供 `Instant` 基准与调用形状 | **部分**：反应器进程级，但 `TrTime: TrDelay + TrClock` 让「睡在哪个基准、读哪个时刻」由同一个值回答 |
-//! | `spawn_local` / `run_until` / 阻塞驱动 | **不在值上**：[`LocalScope`] 持有的 `Rc<LocalExecutor<'static>>` | 值只负责**交出**作用域；队列归作用域，且是 `!Send` |
+//! | `spawn_local` / `run_until` | **不在值上**：本线程 `thread_local!` 里的 `Rc<LocalExecutor<'static>>` | 值只负责**交出**别名；队列归本线程，且是 `!Send` |
 //!
 //! 这是本 crate 与 `abs_art-tokio` 的形状差异：tokio 的值是一个 `Send + Sync` 的
-//! `Handle`（钉得住全局 spawn），smol 的值什么也钉不住（ZST）。
+//! `Handle`（钉得住全局 spawn），smol 的值什么也钉不住（ZST）。**本地队列这一侧两个
+//! 后端是一致的**：都在本线程的 `thread_local!` 里，`LocalScope` 都只是别名。
 //!
 //! # 两种用法
 //!
@@ -106,10 +107,10 @@
 //!
 //! // `local_scope()` 要求 CAPS 含 SPAWN_LOCAL（这里显式写出来）
 //! let scope = Runtime::<{ SPAWN_LOCAL }>::current().local_scope();
-//! let out = scope.block_on(async {
+//! let out = smol::block_on(scope.run_until(async {
 //!     let rc = std::rc::Rc::new(6u32); // !Send：只有本地队列能承载
 //!     scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-//! });
+//! }));
 //! assert_eq!(out, 42);
 //! ```
 
@@ -152,7 +153,8 @@ pub const FULL: usize = abs_art::FULL;
 ///
 /// 对应基础 crate 中的 [`RuntimeTag::Smol`]。它是**零大小的标记**（`size_of == 0`）：
 /// smol 没有可捕获的环境运行时，全局执行器与阻塞线程池又都是进程级单例，因此本值
-/// **不持有任何状态**——本地队列也不在它里面（那是线程独占资源，见 [`LocalScope`]）。
+/// **不持有任何状态**——本地队列也不在它里面（队列在本线程的 `thread_local!` 里，
+/// 见 [`LocalScope`]）。
 ///
 /// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认 [`FULL`]（全功能），
 /// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_SEND }>` 只声明部分能力。掩码决定这个
@@ -168,13 +170,14 @@ pub const FULL: usize = abs_art::FULL;
 ///
 /// 本值是 ZST、不含队列，因此是 `Send + Sync` 的：可以跨线程传、可以放进 `static`
 /// （`abs_art-tokio` 的值同样是 `Send + Sync`，但它装着一个 `Handle`；本值什么都不装）。
-/// 线程独占的是 [`LocalScope`]——它的 `Rc<LocalExecutor<'static>>` 是 `!Send`。
+/// 线程独占的是 [`LocalScope`]——它是本线程 `thread_local!` 里那条
+/// `Rc<LocalExecutor<'static>>` 的别名，因此是 `!Send`。
 ///
 /// # 克隆
 ///
-/// `Clone` 只是复制这个零大小的标记（同一个类型、同一个能力集），不涉及任何队列：
-/// 要「同一条队列的第二个把手」，克隆 [`LocalScope`]；要「另一条队列」，再调一次
-/// [`Runtime::local_scope()`]。
+/// `Clone` 只是复制这个零大小的标记（同一个类型、同一个能力集），不涉及任何队列。
+/// 本地队列那边，「克隆作用域」与「再调一次 [`Runtime::local_scope()`]」**是同一件
+/// 事**：都是同一条队列的别名。
 pub struct Runtime<const CAPS: usize = FULL>;
 
 /// 构造**全能力**（`Runtime<FULL>`）运行时值。
@@ -255,7 +258,7 @@ impl<const CAPS: usize> Runtime<CAPS>
 where
     [(); CAPS]: abs_art::HasSpawnLocal,
 {
-    /// 交出**一条新的**本地队列——一个线程独占的 [`LocalScope`]。
+    /// 交出本线程的本地队列——它的一个**别名**（[`LocalScope`]）。
     ///
     /// # 为什么要求能力位
     ///
@@ -264,18 +267,18 @@ where
     /// 投递」这件事写在类型上。声明位的价值是「**必须写下来**」，不是「写不下来
     /// 就用不了」。
     ///
-    /// # 每次调用得到的是**新队列**
+    /// # 幂等：同一线程上永远给同一条队列
     ///
-    /// smol 没有可捕获的运行时，队列完全由本函数新建（`Rc<LocalExecutor<'static>>`）；
-    /// 也就是说本方法**不读取 `self`**（`&self` 只是为了三后端调用形状一致）。要
-    /// 「同一条队列的第二个把手」，克隆交出的作用域（[`LocalScope`] 的 `Clone` 共享
-    /// 同一个 `Rc`）；要两条独立队列，调两次本方法。
+    /// 队列在**本线程的 `thread_local!`** 里（`Rc<LocalExecutor<'static>>`），本方法
+    /// 只是取出它的别名；也就是说本方法**不读取 `self`**（`&self` 只是为了三后端调用
+    /// 形状一致）。因此同一线程上调用多次得到的是**同一条**队列，与克隆作用域等价；
+    /// 「同一线程多条 `LocalExecutor`」不再是本 crate 的使用方式。
     ///
     /// # 线程独占
     ///
-    /// 队列是**调用方创建、调用方驱动**的独立对象，且 `Rc` 使它 `!Send`：作用域只能
-    /// 在**这条**线程上被驱动。需要在别的线程上投递本地任务时，在那边另取一个作用域
-    /// （本方法无先决条件，任何线程都能调）。
+    /// 队列绑定本线程，`Rc` 使作用域 `!Send`：它只能在**这条**线程上被驱动。需要在别的
+    /// 线程上投递本地任务时，在那边另取一个作用域（本方法无先决条件，任何线程都能调，
+    /// 量到的是那条线程自己的队列）。
     ///
     /// # Examples
     ///
@@ -284,13 +287,13 @@ where
     /// use abs_art_smol::Runtime;
     ///
     /// let scope = Runtime::<{ SPAWN_LOCAL }>::current().local_scope();
-    /// let out = scope.block_on(async {
+    /// let out = smol::block_on(scope.run_until(async {
     ///     scope.spawn_local(async { 7u32 }).await.unwrap()
-    /// });
+    /// }));
     /// assert_eq!(out, 7);
     /// ```
     pub fn local_scope(&self) -> LocalScope {
-        LocalScope::with_executor()
+        LocalScope::for_current_thread_()
     }
 }
 

@@ -50,14 +50,15 @@
 //! [`TrBlockOn`] + [`TrDelay`] / [`TrTime`] / [`TrClock`] + [`TrSpawnBlocking`] +
 //! [`TrLocalScope`]。
 //!
-//! 本地投递（`!Send` 任务）需要一个**线程独占的作用域值**，由运行时值交出：
+//! 本地投递（`!Send` 任务）需要一个**本线程队列的别名**，由运行时值交出。阻塞与
+//! 驱动队列是**两件事**（作用域上不再有阻塞入口），组合起来才既等待又推进队列：
 //!
 //! ```no_run
-//! use abs_art_bridge::{FULL, Runtime, TrLocalScope};
+//! use abs_art_bridge::{FULL, Runtime, TrBlockOn, TrLocalScope};
 //!
 //! let rt = Runtime::<{ FULL }>::current();
 //! let scope = rt.local_scope();           // 要求 CAPS 含 SPAWN_LOCAL
-//! let out = scope.block_on(scope.run_until(async {
+//! let out = rt.block_on(scope.run_until(async {
 //!     let rc = std::rc::Rc::new(1u32);    // !Send：只有本地队列能承载
 //!     scope.spawn_local(async move { *rc }).await.unwrap()
 //! }));
@@ -422,30 +423,30 @@ mod tests_tokio_ {
     //! 缺省后端走，而 `cargo test --workspace` 会把 bridge 的 feature 取并集
     //! （缺省后端 + 下游所用的后端）。用别名之后，本模块无论缺省是谁都在测 tokio。
 
-    use super::{BLOCK_ON, RuntimeTag, SPAWN_LOCAL, TokioRuntime as Runtime, TrLocalScope};
+    use super::{
+        BLOCK_ON, RuntimeTag, SPAWN_LOCAL, TokioRuntime as Runtime, TrBlockOn, TrLocalScope,
+    };
 
     /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`TokioRuntime` 与
     /// `TokioLocalScope` 确实解析为 tokio 后端的类型，且能力位与本地投递可用。
     ///
-    /// 手段：在 tokio 运行时上下文内构造声明了 `BLOCK_ON | SPAWN_LOCAL` 的值，
-    /// 由它交出本地作用域，再用作用域的 `block_on` 驱动一个 `!Send` 任务；
-    /// 同时比较 `tag()` 与抽象标签。
+    /// 手段：在运行时上下文**之外**用 `with_handle` 构造声明了
+    /// `BLOCK_ON | SPAWN_LOCAL` 的值，由它交出本地作用域，再用
+    /// `rt.block_on(scope.run_until(..))` 驱动一个 `!Send` 任务；同时比较 `tag()` 与
+    /// 抽象标签。
     ///
     /// 判断：`tag()` 等于 [`RuntimeTag::Tokio`]，且本地任务取回 42。
     #[test]
     fn tokio_backend_resolves() {
         let outer = tokio::runtime::Runtime::new().unwrap();
+        let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::with_handle(outer.handle().clone());
+        assert_eq!(rt.tag(), RuntimeTag::Tokio);
 
-        let out = outer.block_on(async {
-            let rt = Runtime::<{ BLOCK_ON | SPAWN_LOCAL }>::current();
-            assert_eq!(rt.tag(), RuntimeTag::Tokio);
-
-            let scope = rt.local_scope();
-            scope.block_on(async {
-                let rc = std::rc::Rc::new(6u32);
-                scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-            })
-        });
+        let scope = rt.local_scope();
+        let out = rt.block_on(scope.run_until(async {
+            let rc = std::rc::Rc::new(6u32);
+            scope.spawn_local(async move { *rc * 7 }).await.unwrap()
+        }));
 
         assert_eq!(out, 42);
     }
@@ -527,14 +528,16 @@ mod tests_smol_ {
     //!
     //! 同样用**具名别名** `SmolRuntime`。
 
-    use super::{BLOCK_ON, RuntimeTag, SPAWN_LOCAL, SmolRuntime as Runtime, TrLocalScope};
+    use super::{
+        BLOCK_ON, RuntimeTag, SPAWN_LOCAL, SmolRuntime as Runtime, TrBlockOn, TrLocalScope,
+    };
 
     /// 目的：验证桥接 crate 在启用 `backend-smol` 时，`SmolRuntime` 与
     /// `SmolLocalScope` 解析正确，本地投递可用，且运行时值是 `Send + Sync` 的
     /// 零大小标记（不携带队列）。
     ///
-    /// 手段：直接构造值（smol 无环境运行时前提），用作用域的 `block_on` 驱动一个
-    /// `!Send` 任务；另加编译期 `Send + Sync` 断言。
+    /// 手段：直接构造值（smol 无环境运行时前提），用 `rt.block_on(scope.run_until(..))`
+    /// 驱动一个 `!Send` 任务；另加编译期 `Send + Sync` 断言。
     ///
     /// 判断：`tag()` 等于 [`RuntimeTag::Smol`]，本地任务取回 42，断言编译通过。
     #[test]
@@ -545,10 +548,10 @@ mod tests_smol_ {
         assert_eq!(rt.tag(), RuntimeTag::Smol);
 
         let scope = rt.local_scope();
-        let out = scope.block_on(async {
+        let out = rt.block_on(scope.run_until(async {
             let rc = std::rc::Rc::new(6u32);
             scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-        });
+        }));
         assert_eq!(out, 42);
 
         fn assert_send_sync<T: Send + Sync>() {}

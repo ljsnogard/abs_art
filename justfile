@@ -44,8 +44,10 @@ test-backend-smol:
 #
 # 全部应当通过。spawn_local 的 12 格在最早的**类型级** spawn_local 下曾有两格是红的
 # （smol 的「运行时驱动」与「detach 后存活」）；把本地队列交给「作用域值」持有后转绿。
-# 本版一度把队列并回**运行时值**，最终又剥回独立作用域（`rt.local_scope()` →
-# `scope.spawn_local` / `scope.run_until` / `scope.block_on`）。
+# 本版一度把队列并回**运行时值**，再剥回独立作用域；最终（2026-10-06）作用域对齐
+# compio 语义——队列进本线程 `thread_local!`、`local_scope()` 幂等、作用域上只留
+# `scope.spawn_local` / `scope.run_until`（阻塞入口已从 trait 删除，需要同步等待时写
+# `rt.block_on(scope.run_until(..))`，D 用例即该组合）。
 # 本配方同时是那次改造的验收标准与回归防线。
 smoke:
     cargo test -p abs_art-smoke

@@ -22,8 +22,8 @@ where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有�
 
 > **本版（0.3.0，开发中）的几次收敛。** 能力 trait 不再带 `F` 类型参数：被 spawn 的
 > future 类型是各自动**方法级泛型参数**，于是一个 `R: TrSpawnSend` 约束就能覆盖该运行时上
-> **所有**任务类型（包括调用点无法命名的 `async {}` 块）。**本地投递**则经过三轮收敛，
-> 最终定型为「声明位 + 线程独占的作用域值」：
+> **所有**任务类型（包括调用点无法命名的 `async {}` 块）。**本地投递**则经过四轮收敛，
+> 最终定型为「声明位 + 线程本地队列的别名」：
 >
 > 1. 最初是类型级 `TrSpawnLocal<F>`；
 > 2. 后来拆成「能力位 `SPAWN_LOCAL`（只负责声明）+ `TrLocalScope` 值」，但那个作用域
@@ -33,8 +33,12 @@ where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有�
 >    `Send + Sync` 的 `Handle`，而「可共享的把手」与「线程独占的队列」两种生命周期
 >    被绑死；
 > 4. **最终定型**：`Runtime` 是**值**（`&self` 能力方法：全局投递 / 阻塞等待 / 计时与
->    时刻），`LocalScope` 是**另一个值**（线程独占，只管 `!Send` 任务的投递与驱动），
->    且只能经 `Runtime<CAPS>::local_scope()` 取得（要求 `CAPS` 含 `SPAWN_LOCAL`）；
+>    时刻）；`LocalScope` 是**本线程那条队列的别名**——tokio / smol 把队列放进
+>    `thread_local!`，compio 的队列本就在线程本地的运行时实例里（它是本次对齐的基准）。
+>    三条可依赖的性质：`Clone` 只增加别名、同一线程上多次 `local_scope()` 拿到**同一条**
+>    队列、类型是 `!Send`；「同一线程多条 `LocalSet`」被显式排除。作用域上**没有**阻塞
+>    入口（tokio 的 `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止，三个后端对同一个
+>    名字给不出同一个承诺），需要同步等待时组合 `rt.block_on(scope.run_until(f))`；
 >    新增 `TrClock`（`TrTime: TrDelay + TrClock`）让「时刻与计时器同源」成为类型约束；
 >    **compio 不实现 `TrSpawnSend`**——它没有跨线程全局队列，假装有会让约束失真。
 >    收敛过程与实测见 `dev-notes/`。
@@ -83,16 +87,17 @@ where
 }
 ```
 
-本版定型的形状：**运行时是值**，**本地队列是另一个值**：
+本版定型的形状：**运行时是值**，**本地队列是本线程那条队列的别名**：
 
 | 关切 | 从哪调 | 为什么 |
 | --- | --- | --- |
 | `spawn`（全局队列） | **运行时值** `rt.spawn(..)` | 队列可跨线程共享，值是它的把手（tokio / smol） |
 | `block_on` / `delay` / `interval` / `now` | **运行时值** | 与「在哪个线程调度」无关 |
-| `spawn_local` / `run_until` / `block_on`（驱动本地队列） | **作用域值** `scope.…` | 队列绑定线程、必须由持有者驱动 |
+| `spawn_local` / `run_until` | **作用域值** `scope.…` | 队列绑定线程，而作用域只是本线程那条队列的别名 |
+| 同步等待 **且** 驱动队列 | 两者**组合** | `rt.block_on(scope.run_until(f))`——阻塞与驱动是两件事 |
 
 作用域从运行时值交出：`rt.local_scope()`，**要求 `CAPS` 含 `SPAWN_LOCAL`**——
-想用本地投递，就得把这件事写在类型上。
+想用本地投递，就得把这件事写在类型上；同一线程上多次取得拿到的是**同一条**队列。
 
 **compio 不实现 `TrSpawnSend`**：它没有跨线程全局队列，`spawn` 投的是本线程运行时的
 队列，因此「三后端共用」的业务代码只能建立在共同子集上（上例的业务函数 A）。
@@ -137,20 +142,21 @@ abs_art            基础 crate：不依赖任何运行时
                     │          ※ 全部是 **&self 方法**：能力由运行时「值」提供
                     │          （TrJoinHandle::detach：smol/compio 原生支持，
                     │           tokio 无原生 detach，drop 句柄即 detach——语义等价）
-                    ├─ trait：TrLocalScope —— **线程独占**的本地作用域
-                    │          （spawn_local / run_until / block_on；计时与时刻不在这里）
+                    ├─ trait：TrLocalScope —— **本线程队列的别名**
+                    │          （spawn_local / run_until；没有阻塞入口，计时与时刻也不在这里）
                     └─ caps：能力位掩码（BLOCK_ON / DELAY / SPAWN_SEND /
                               SPAWN_LOCAL / SPAWN_BLOCKING / CLOCK）与类型级标记
                               ※ 位负责「声明」，且真正门控调用点；每个后端另有
                                 自己的 `FULL`（compio 的 FULL 不含 SPAWN_SEND）
 
 abs_art-tokio      tokio 后端：Runtime<const CAPS> = Handle（Send + Sync）；
-                   LocalScope = Rc<LocalSet>（!Send，线程独占）
+                   LocalScope = 本线程 thread_local! 里那条 LocalSet 的别名
+                   （Rc<LocalSet> + 一个 Handle，!Send）
 abs_art-compio     compio 后端：Runtime 持 compio 运行时（本身线程绑定）；
-                   LocalScope 持同一份运行时；**声明 SPAWN_SEND 即静态失败**
-                   （自己的 FULL 不含该位）
+                   LocalScope 持同一份运行时（形状对齐的**基准**）；
+                   **声明 SPAWN_SEND 即静态失败**（自己的 FULL 不含该位）
 abs_art-smol       smol 后端：Runtime 是零大小标记（全局执行器进程级）；
-                   LocalScope = Rc<LocalExecutor>
+                   LocalScope = 本线程 thread_local! 里那条 LocalExecutor 的别名
 
 abs_art-bridge     桥接：backend-tokio / backend-compio / backend-smol 可多选，
                    裸名 Runtime 默认哪个由 cfg 优先级 / 显式 default-backend-* 决定；
@@ -177,7 +183,7 @@ abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = fa
 
 1. **能力检查发生在编译期**：`CAPS` 是 const 位掩码，`[(); CAPS]: HasBlockOn` 这类类型级标记在编译期被求解，决定这个运行时值实现了哪些能力 trait。
 2. **调用是静态分发**：`rt.block_on(...)` / `rt.spawn(...)` 在编译期被单态化为直接调用 tokio/compio/smol 的 API。**没有 vtable、没有 `Box`、没有 downcast、没有动态分发**——最终机器码与手写后端调用等价。
-3. **运行时值本身很小**：tokio 版是「一个 `Handle` + 一个 `Rc<LocalSet>`」，没有任何按能力构造的数据结构；`spawn` / `delay` / `now` 的路径上只有一次直接调用。
+3. **运行时值本身很小**：tokio 版只有一个 `Handle`（本地队列在 `thread_local!` 里），没有任何按能力构造的数据结构；`spawn` / `delay` / `now` 的路径上只有一次直接调用。
 3. **后端 crate 的五个功能（`block_on` / `delay` / `spawn_send` / `local_scope` / `spawn_blocking`）是 feature 开关**：按需编译，不用的代码不进产物。
 
 对比其它方案：运行时注入（log 风格）需要类型擦除 + 装箱 + downcast，每次调用都有开销；泛型穿透需要把 `R` 参数写进每个函数签名。abs_art 用"能力声明"把两者都省掉了——零开销，且签名干净。
@@ -189,7 +195,7 @@ abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = fa
 | | 回答的问题 | 载体 |
 |---|---|---|
 | 能力位 `SPAWN_LOCAL` | 你**声明**了没有？ | `Runtime<CAPS>` 的类型级标记 |
-| 作用域值 | 你**拿到**了没有？ | 实现 `TrLocalScope` 的 `LocalScope`（线程独占） |
+| 作用域值 | 你**拿到**了没有？ | 实现 `TrLocalScope` 的 `LocalScope`（本线程队列的别名） |
 
 #### 位负责「声明」
 
@@ -217,27 +223,30 @@ let handle = scope.spawn_local(async { 1u32 }); // ← 投递点在作用域上
 
 | | 本地队列归谁所有 | 谁驱动它 | 作用域是什么 |
 |---|---|---|---|
-| **tokio** | 调用方的 `LocalSet` | 作用域的 `run_until` / `block_on` | 持 `Rc<LocalSet>` 的值（`!Send`） |
-| **smol** | 调用方的 `LocalExecutor` | 作用域的 `run_until` / `block_on` | 持 `Rc<LocalExecutor>` 的值（`!Send`） |
-| **compio** | 运行时实例自己（线程绑定） | 运行时在驱动期间自己推 | 零大小标记（`run_until` ≡ await） |
+| **tokio** | **本线程的 `thread_local!`**（`Rc<LocalSet>`） | 作用域的 `run_until`（在运行时上下文里被 poll） | 那条队列的别名（`!Send`、可 `Clone`、幂等） |
+| **smol** | **本线程的 `thread_local!`**（`Rc<LocalExecutor>`） | 作用域的 `run_until` | 那条队列的别名（`!Send`、可 `Clone`、幂等） |
+| **compio** | 运行时实例自己（线程绑定，不可分离） | 运行时在驱动期间自己 tick 队列 | 那份运行时的别名（`run_until` ≡ await）；**对齐基准** |
 
 ```rust
 scope.spawn_local(async move { *rc });   // 投递点
-scope.run_until(async { .. }).await;     // 异步驱动点
-scope.block_on(async { .. });            // 阻塞驱动点（同时驱动队列）
+scope.run_until(async { .. }).await;     // 唯一的驱动点（异步）
+rt.block_on(scope.run_until(f));         // 需要同步等待时的组合写法
 ```
 
-好处有四条：
+好处有五条：
 
-1. **不会串**：作用域只能从运行时值取得，队列与它的驱动者绑在一起，不存在
-   「作用域与运行时无关」的组合；
+1. **不会串**：作用域只能从运行时值取得，且它就是**本线程那条队列**——不存在
+   「作用域与运行时无关」或「同一线程好几条队列」的组合；
 2. **前提编译期可见**：没写 `SPAWN_LOCAL` 位就取不到作用域；
-3. **三个后端如实表达自己**：tokio / smol 的作用域装着各自的队列，compio 的是零大小
-   （队列归运行时自己，不可分离）；
-4. **任务与句柄解绑**：队列随作用域存活而不是随 `JoinHandle` 存活，因此 `detach()`
-   之后本地任务照常被驱动（这正是 `smux_v1` 的读 / 写循环所依赖的语义）。
+3. **三个后端对齐同一套语义**：`Clone` 只增加别名、同一线程上多次取得拿到同一条、
+   类型 `!Send`（tokio / smol 靠 `thread_local!` 做到，compio 本来如此——它是基准）；
+4. **任务与句柄解绑**：队列归本线程而不是归 `JoinHandle`，因此 `detach()` 之后本地
+   任务照常被驱动（这正是 `smux_v1` 的读 / 写循环所依赖的语义）；
+5. **阻塞与驱动分属两个 trait**：作用域只提供异步驱动 `run_until`，同步等待由运行时
+   值的 `block_on` 提供；需要两者时写成 `rt.block_on(scope.run_until(f))`，
+   不必猜「这个后端的 `scope.block_on` 究竟做了什么」。
 
-业务代码对本地投递只依赖 `S: TrLocalScope`（泛型于作用域值），切换后端零改动。
+业务代码对本地投递只依赖 `S: TrLocalScope`（泛型于作用域），切换后端零改动。
 
 **为什么队列不放在运行时值里**：tokio 的 `Handle` 本来 `Send + Sync`，塞进一个
 `Rc<LocalSet>` 之后整个值就不能跨线程传了；而「可共享的把手」与「线程独占的队列」
@@ -257,6 +266,8 @@ let scope = abs_art_smol::current().local_scope();
 let value = ManualTime::new(abs_art_smol::current(), clock.clone());
 
 let started = std::time::Instant::now();
+// `block_on_advancing` 是各后端在 `mock-clock` feature 下的**固有方法**，不是
+// `TrLocalScope` 契约的一部分（作用域契约里没有阻塞入口）。
 scope.block_on_advancing(&clock, async {
     value.delay(core::time::Duration::from_secs(3_600)).await; // 虚拟一小时
     assert_eq!(value.now().as_millis(), 3_600_000);
@@ -326,12 +337,19 @@ just smoke                    # 跑跨后端 spawn_local 行为契约矩阵（�
 | A 句柄驱动（spawn 后 await `JoinHandle`） | ✅ | ✅ | ✅ |
 | B 运行时驱动（宿主**不 poll 句柄**，先等循环自己回报） | ✅ | ✅ | ✅ |
 | C `detach()` 后循环继续被调度 | ✅ | ✅ | ✅ |
-| D `scope.block_on` 阻塞驱动（同时推本地队列） | ✅ | ✅ | ✅ |
+| D 阻塞组合（`rt.block_on(scope.run_until(f))`：阻塞在值、驱动在作用域） | ✅ | ✅ | ✅ |
 
 **这 12 格曾经有两格是红的。** 在本 crate 建立时（最早的**类型级** `spawn_local`），
 smol 的 B、C 两格失败：那时 `abs_art-smol` 每次 `spawn_local` 都新建一个
 `LocalExecutor` 并把它绑在 `JoinHandle` 上，句柄一旦 poll 不到或被 `detach()` 掉，
-本地任务就再也推不动。把本地队列改成由**作用域值**持有之后两格转绿。
+本地任务就再也推不动。把本地队列改成由**本线程**持有（`thread_local!`，作用域只是
+别名）之后两格转绿。
+
+> D 用例原本走的是 `TrLocalScope::block_on`。那条能力已在「作用域对齐 compio 语义」
+> 这一轮从 trait 上删除（tokio 的 `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止，
+> 三个后端对同一个名字给不出同一个承诺），因此 D 用例改为**组合写法**
+> `rt.block_on(scope.run_until(f))`：阻塞由运行时值提供，驱动由作用域提供。
+> 判定标准一字未改，证据反而更精确——只 `value.block_on(f)` 会挂起。
 
 调研过程、三个运行时的源码级能力对比与改造决策见
 [`dev-notes/spawn_local-20261002-1247.md`](dev-notes/spawn_local-20261002-1247.md)。

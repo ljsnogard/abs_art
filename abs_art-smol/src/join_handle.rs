@@ -25,7 +25,8 @@ use crate::Runtime;
 /// - 全局任务（[`TrSpawnSend::spawn`](abs_art::TrSpawnSend::spawn)）由 smol 的
 ///   后台线程驱动，能否推进与句柄无关；
 /// - 本地任务（[`TrLocalScope::spawn_local`](abs_art::TrLocalScope::spawn_local)）
-///   由**作用域值**（`LocalScope`）持有的 `LocalExecutor` 驱动，同样与句柄无关；
+///   由**本线程**队列（`thread_local!` 里那条 `LocalExecutor`，作用域只是它的别名）
+///   驱动，同样与句柄无关；
 /// - `detach()` 因此回到「任务继续跑、只是不要结果」的正常语义。
 pub struct JoinHandle<T> {
     inner: smol::Task<T>,

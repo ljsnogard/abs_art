@@ -38,8 +38,12 @@
 //! compio 的队列由运行时自己驱动，**不存在**「需要调用方额外驱动的队列」这回事
 //! （对照 tokio 的 `LocalSet::run_until`）。因此本后端的 `run_until(future)`
 //! **原样返回 `future`**：驱动来自外层已经在跑的那个 compio `block_on` / `wait`。
-//! 需要「阻塞式驱动」时用 [`TrLocalScope::block_on`]，它直接落到
-//! `self.rt_.block_on(future)`（compio 的 `block_on` 自己会 `enter` 并 tick 队列）。
+//!
+//! 抽象层的作用域上**没有**阻塞入口（tokio 的 `block_in_place` 在 `LocalSet` 内被
+//! tokio 自己禁止，那条能力因此被收回）。需要阻塞等待时用运行时值的
+//! [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on)——在 compio 上它顺带就把
+//! 本运行时的执行器 tick 了：`self.rt_.block_on` 自己 `enter` 并循环执行
+//! 「轮询 future → tick executor → 轮询驱动」。
 
 use core::{fmt, future::Future};
 
@@ -48,6 +52,18 @@ use abs_art::TrLocalScope;
 use crate::JoinHandle;
 
 /// compio 后端的本地作用域：钉住一份 compio 运行时作为队列与驱动点。
+///
+/// # 本后端是「作用域形状」的对齐基准
+///
+/// 家族现在要求三后端的 [`TrLocalScope`] 都是**线程本地那条队列的别名**：`Clone`
+/// 只增加别名、同一线程上多次取得拿到同一条队列、类型 `!Send`。compio 天然满足这套
+/// 语义——队列不可与运行时实例分离，而 compio 的运行时本身线程绑定，所以「作用域」
+/// 就是那份运行时的别名，`local_scope()` 对同一个值幂等。tokio / smol 侧是靠把队列
+/// 放进 `thread_local!` 对齐到这条语义的。
+///
+/// 一处**如实的差异**：compio 允许同一线程上存在多份运行时实例（`Runtime::with_runtime`），
+/// 那时每份实例各有自己的队列——这是 compio 运行时自身的性质，不属于本家族的契约面；
+/// 正常路径（`Runtime::current()`）下三者可观察语义一致。
 ///
 /// # 线程独占
 ///
@@ -111,7 +127,8 @@ impl fmt::Debug for LocalScope {
 
 impl TrLocalScope for LocalScope {
     /// 与 `spawn_blocking` 共用同一个 [`JoinHandle`]。
-    type Handle<T> = JoinHandle<T>
+    type Handle<T>
+        = JoinHandle<T>
     where
         T: 'static;
 
@@ -141,24 +158,6 @@ impl TrLocalScope for LocalScope {
         F: Future,
     {
         future
-    }
-
-    /// 阻塞当前线程，驱动**本作用域钉住的**运行时，直到 `future` 完成。
-    ///
-    /// compio 的 `Runtime::block_on` 自己 `enter` 出上下文并循环执行
-    /// 「轮询 future → tick executor → 轮询驱动」，因此：
-    ///
-    /// - 调用点**不必**已处于 compio 运行时上下文内；
-    /// - 等待期间本运行时的执行器队列持续被 tick，投到它上面的本地任务同样被推进。
-    ///
-    /// # Panics
-    ///
-    /// 本方法自身不 panic。
-    fn block_on<F>(&self, future: F) -> <F as Future>::Output
-    where
-        F: Future,
-    {
-        self.rt_.block_on(future)
     }
 }
 
@@ -199,25 +198,28 @@ mod tests {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证作用域的阻塞入口 `TrLocalScope::block_on` 能独立驱动队列并取回结果
-    /// ——它落在 `self.rt_.block_on(future)` 上，compio 自己 `enter` 并 tick 队列。
+    /// 目的：验证**上下文之外**也能驱动本地队列——compio 的值自带上下文，不需要外层
+    /// 已经进入运行时。
     ///
-    /// 实施策略：在 compio 上下文**之外**（测试线程）用 `with_runtime` 造运行时值、交出
-    /// 作用域，再直接 `scope.block_on` 一个「先 `spawn_local` 再 await 句柄」的 async 块。
-    /// 捕获 `Rc` 保证任务是 `!Send` 的，只有本地路径能承载。
+    /// 实施策略：在 compio 上下文之外（测试线程）用 `with_runtime` 造运行时值、交出
+    /// 作用域，再用 `value.block_on(scope.run_until(..))` 驱动一个「先 `spawn_local`
+    /// 再 await 句柄」的 async 块。捕获 `Rc` 保证任务是 `!Send` 的，只有本地路径能承载。
     ///
-    /// 通过依据：返回 `40 + 2 == 42`；若 `block_on` 没有驱动执行器队列，await 句柄会永久
-    /// 挂起（测试会挂死）；若它仍依赖环境上下文，会直接 panic。
+    /// 通过依据：返回 `40 + 2 == 42`。这是本后端与 tokio 的一处真实差异：tokio 的
+    /// `block_in_place` 需要运行时上下文（`LocalSet` 内甚至直接 panic），而 compio 的
+    /// `block_on` 自己 `enter` 并在循环里 tick 执行器队列。
     #[test]
-    fn scope_block_on_outside_context_drives_local_tasks() {
+    fn block_on_outside_context_drives_local_queue() {
+        use abs_art::TrBlockOn;
+
         let rt = CompioRuntime::new().unwrap();
         let value = Runtime::<{ FULL }>::with_runtime(rt.clone());
         let scope = value.local_scope();
 
-        let out = scope.block_on(async {
+        let out = value.block_on(scope.run_until(async {
             let rc = Rc::new(40u32);
             scope.spawn_local(async move { *rc + 2 }).await.unwrap()
-        });
+        }));
 
         assert_eq!(out, 42);
     }
@@ -346,8 +348,8 @@ mod tests {
     /// 后端**不**照搬 tokio 那条「运行时值 `Send + Sync`」的性质。
     ///
     /// 实施策略：同一线程内用 `with_runtime` 造运行时值，交出作用域，依次经
-    /// `TrBlockOn::block_on`（运行时值）与 `TrLocalScope::block_on`（作用域）各驱动一个
-    /// future。
+    /// `TrBlockOn::block_on` 驱动一个普通 future、以及经
+    /// `value.block_on(scope.run_until(..))` 驱动一个本地队列任务。
     ///
     /// 通过依据：两次都取回预期值（编译通过即同时证明两个值都可用于本线程）；compio 的
     /// 运行时含 `Rc`、是 `!Send` 的，因此本用例**刻意不**断言 `Send` / `Sync`——那对本
@@ -361,7 +363,7 @@ mod tests {
         let scope = value.local_scope();
 
         assert_eq!(value.block_on(async { 6u32 }), 6);
-        assert_eq!(scope.block_on(async { 7u32 }), 7);
+        assert_eq!(value.block_on(scope.run_until(async { 7u32 })), 7);
     }
 }
 

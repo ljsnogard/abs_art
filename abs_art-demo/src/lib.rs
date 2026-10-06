@@ -333,20 +333,25 @@ where
         .await
 }
 
-/// 共同子集示例业务函数：同步地、**由作用域驱动队列**地取回本地任务结果。
+/// 共同子集示例业务函数：**阻塞地**、由作用域驱动队列地取回本地任务结果。
 ///
-/// 这里刻意使用 [`TrLocalScope::block_on`]（**恢复了**的能力），而不是
-/// `Runtime::block_on`：
+/// 抽象层的作用域上**没有**阻塞入口：tokio 的 `block_in_place` 在 `LocalSet` 内被
+/// tokio 自己禁止，三个后端对「`scope.block_on`」给不出同一个承诺，所以那条能力被
+/// 收回了。可移植的写法是把作用域的 [`TrLocalScope::run_until`] 交给运行时值的
+/// [`TrBlockOn::block_on`] 去等：
 ///
-/// - `scope.block_on(f)` 在等待期间**持续驱动本地队列**，`f` 里 spawn 的本地
-///   任务因此能完成；
-/// - `rt.block_on(f)` 只等待，不驱动任何队列——若把本函数体换成
-///   `rt.block_on(..)`，内部 `spawn_local` 的任务可能永远不被推进。
+/// - `scope.run_until(f)` 负责**驱动本线程的本地队列**——`f` 里 spawn 的本地任务
+///   因此能被推进；
+/// - `rt.block_on(..)` 只负责**阻塞当前线程**直到它完成。
+///
+/// 对照点：直接 `rt.block_on(f)` 而**不**套 `run_until` 会漏掉队列——`f` 里
+/// `spawn_local` 的任务可能永远不被推进（tokio / smol 上是静默挂起）。
 ///
 /// # Panics
 ///
-/// 各后端的先决条件与其 `TrBlockOn` 实现一致（tokio 需要多线程运行时且调用点
-/// 已处于运行时上下文内），不满足时由后端 panic。
+/// 各后端的先决条件与其 `TrBlockOn` 实现一致（tokio 需要多线程运行时，且调用点
+/// **不得**处于 `LocalSet` 的驱动栈内——那时 `block_in_place` 会 panic），不满足时
+/// 由后端 panic。
 ///
 /// # Examples
 ///
@@ -355,16 +360,17 @@ where
 ///
 /// let value = LocalRt::current();
 /// let scope = value.local_scope();
-/// assert_eq!(local_double_blocking(&scope, 21), 42);
+/// assert_eq!(local_double_blocking(&value, &scope, 21), 42);
 /// ```
-pub fn local_double_blocking<S>(scope: &S, x: i32) -> i32
+pub fn local_double_blocking<R, S>(rt: &R, scope: &S, x: i32) -> i32
 where
+    R: TrBlockOn,
     S: TrLocalScope,
 {
-    scope.block_on(async {
+    rt.block_on(scope.run_until(async {
         let rc = std::rc::Rc::new(x);
         scope.spawn_local(async move { *rc * 2 }).await.unwrap()
-    })
+    }))
 }
 
 /// 共同子集示例业务函数：一次性睡眠与超时都从**运行时值**取。
@@ -651,14 +657,13 @@ mod tests_tokio {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证**作用域的** `block_on` 会驱动本地队列（而运行时值的
-    /// `block_on` 不会）。
+    /// 目的：验证「运行时值阻塞 + 作用域驱动队列」这套组合能取回本地任务结果。
     ///
-    /// 实施策略：tokio 的 `TrLocalScope::block_on` 基于 `block_in_place`，因此用
-    /// 多线程运行时；在其 `block_on` 上下文内构造 [`LocalRt`] 值、取作用域，
-    /// 调用同步的 [`local_double_blocking`]（内部只用 `scope.block_on`）。
+    /// 实施策略：多线程 tokio 运行时；在其 `block_on` 上下文内构造 [`LocalRt`] 值、
+    /// 取作用域，调用同步的 [`local_double_blocking`]（内部是
+    /// `rt.block_on(scope.run_until(..))`）。
     ///
-    /// 通过依据：返回 21 * 2 == 42；若驱动点错写成运行时值的 `block_on`，
+    /// 通过依据：返回 21 * 2 == 42；若组合里漏掉 `run_until`（只做 `rt.block_on`），
     /// 内部本地任务不会被推进，测试将挂起。
     #[test]
     fn local_block_on_drives_queue() {
@@ -666,7 +671,7 @@ mod tests_tokio {
         let out = rt.block_on(async {
             let value = LocalRt::current();
             let scope = value.local_scope();
-            local_double_blocking(&scope, 21)
+            local_double_blocking(&value, &scope, 21)
         });
         assert_eq!(out, 42);
     }
@@ -776,20 +781,20 @@ mod tests_compio {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证 compio 下作用域的 `block_on` 同样驱动本地队列。
+    /// 目的：验证 compio 下「运行时值阻塞 + 作用域驱动队列」同样能取回本地任务结果。
     ///
     /// 实施策略：在 compio 运行时上下文内取 [`LocalRt`] 值的作用域，调用同步的
     /// [`local_double_blocking`]。
     ///
-    /// 通过依据：返回 21 * 2 == 42；compio 的队列由运行时自己驱动，因此这条路径
-    /// 没有 tokio 那样的多线程前提。
+    /// 通过依据：返回 21 * 2 == 42；compio 的队列由运行时自己驱动，且 `block_on`
+    /// 可以在上下文内嵌套，因此这条路径没有 tokio 那样的多线程前提。
     #[test]
     fn local_block_on_drives_queue() {
         let rt = compio::runtime::Runtime::new().unwrap();
         let out = rt.block_on(async {
             let value = LocalRt::current();
             let scope = value.local_scope();
-            local_double_blocking(&scope, 21)
+            local_double_blocking(&value, &scope, 21)
         });
         assert_eq!(out, 42);
     }

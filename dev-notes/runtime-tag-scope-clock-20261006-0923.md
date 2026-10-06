@@ -1,5 +1,11 @@
 # 三项构想（第二轮实测）：`Runtime<CAPS, B>`、thread-local `LocalScope`、`TrClock` 作为 Cap
 
+> **后记（2026-10-06 14:20）：本文 §2 的探针结论已成为落地形状。** 当时判定 thread-local 的
+> `LocalScope`「部分可行」并列了六条代价；本日裁决把它采纳为**强制语义**（队列属于线程、
+> 作用域只是别名），并连带删除 `TrLocalScope::block_on`。六条代价的处置——测试隔离改为
+> 「用例各自起独立线程」、不提供 `reset()` / `with_scope()`——与实测见
+> `local-scope-thread-local-20261006-1420.md`。
+
 日期：2026-10-06 09:23（想法 1 部分于 09:45 补完实测）
 性质：**可行性实测**（本轮**不动生产代码**；全部结论来自隔离的探针 workspace）
 来源：承接 `bridge-scope-clock-20261005-1615.md`（下称「前文」）。前文 §1.4 用

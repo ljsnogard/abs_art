@@ -1,5 +1,11 @@
 # 三项构想：bridge 取消「只能一个后端」、thread-local 的 `LocalScope`、`Clock` 作为独立 cap
 
+> **后记（2026-10-06 14:20）：本文 §2 的构想已落地为强制形状。** §1（bridge 放宽多后端）
+> 与 §3（`TrClock`）早已落地；§2「基于 thread-local 的 `LocalScope`」在本日定型——
+> tokio / smol 的队列进本线程 `thread_local!`，作用域只是那条队列的别名，
+> 且 `TrLocalScope::block_on` 被删除（理由见新日志）。裁决与实测见
+> `local-scope-thread-local-20261006-1420.md`。本文保留当时的备选与代价清单，供对照。
+
 日期：2026-10-05 16:15
 性质：**构想 + 证据收集**（**本轮不动代码**）。三节各给现状、可复现证据、构想、待裁决。
 来源：`smux_v1` 落保活（`dev-notes/keepalive-timer-loop-20261005-1420.md`）时暴露的三处

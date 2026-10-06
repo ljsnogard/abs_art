@@ -1,4 +1,9 @@
 //! `block_on`：阻塞当前线程等待 future 完成，同时不影响 tokio 运行时的调度。
+//!
+//! 「不影响调度」的准确含义（实测见 `dev-notes/block-on-semantics-20261006-*.md`）：
+//! worker 线程被让渡出去，**全局（`Send`）任务**由替代 worker 继续跑——它们可能换了
+//! 线程；而**本线程正在驱动的本地队列**（`LocalSet` 的 `!Send` 任务）在阻塞期间停住，
+//! 因为 `!Send` 任务无法迁移。本方法因此**只等待**，不驱动任何本地队列。
 
 use core::future::Future;
 
@@ -14,15 +19,21 @@ where
     /// 本值抓住的句柄驱动 future 直到完成。
     ///
     /// 这是 tokio 官方文档推荐的「在多线程运行时内同步等待 async 结果」的模式：
-    /// 当前线程被阻塞的同时，运行时的其他任务仍能得到调度，即「不影响运行时调度」。
+    /// 当前线程被阻塞的同时，运行时的其他**全局任务**仍能得到调度（可能由替代 worker
+    /// 在别的线程上承接）。
     ///
-    /// 本方法**不涉及本地队列**（队列不归运行时值所有）：要「阻塞等待并驱动本地
-    /// 队列」，用作用域的 `TrLocalScope::block_on`。
+    /// 本方法**不涉及本地队列**（队列不归运行时值所有、也不由本方法驱动）：需要
+    /// 「等待期间继续驱动本线程的本地队列」时，把作用域的
+    /// [`TrLocalScope::run_until`](abs_art::TrLocalScope::run_until) 交给一个正在跑的
+    /// 驱动源去 await。注意本方法内部走 `block_in_place`，而 tokio **禁止**在 `LocalSet`
+    /// 内调用它——所以「作用域的阻塞入口」已从抽象层删除。
     ///
     /// # Panics
     ///
-    /// `block_in_place` 不允许在 current_thread 运行时内使用（没有其他
-    /// worker 线程可以承接任务），此时会 panic。
+    /// - `block_in_place` 不允许在 current_thread 运行时内使用（没有其他
+    ///   worker 线程可以承接任务），此时会 panic；
+    /// - 也不允许在 `LocalSet` 的驱动栈内调用（tokio 的源码注释：
+    ///   「in a LocalSet, where it is _not_ okay to block」），此时同样 panic。
     fn block_on<F>(&self, future: F) -> <F as Future>::Output
     where
         F: Future,
