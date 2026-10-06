@@ -111,8 +111,7 @@ impl fmt::Debug for LocalScope {
 
 impl TrLocalScope for LocalScope {
     /// 与 `spawn_blocking` 共用同一个 [`JoinHandle`]。
-    type Handle<T>
-        = JoinHandle<T>
+    type Handle<T> = JoinHandle<T>
     where
         T: 'static;
 

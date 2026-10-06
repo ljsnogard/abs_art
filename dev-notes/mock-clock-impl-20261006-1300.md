@@ -287,3 +287,20 @@ use crate::{
 
 验证：`cargo test --workspace`（24 目标 ok / 0 失败）、`just test-mock-clock`（11 目标 ok）、
 clippy 0 代码告警、`cargo fmt --all -- --check` 干净、`cargo doc` 0 断链。
+
+---
+
+## 补充（2026-10-06 13:52）：`ManualTime` 补 `Clone`
+
+下游 `smux_v1` 在做「用 `ManualTime` 装饰运行时值」的虚拟时间验收时踩到一个缺口：
+`ManualTime<R, C>` **没有** `Clone`，而消费方常要求运行时值可克隆（`smux_v1` 的
+`MuxConnection::new(rt: R)` 要求 `R: Clone`——核心与循环共享量各持一份连接级时钟）。
+各后端的 `Runtime` 都实现了 `Clone`，本类型作为「运行时值的装饰器」理应同样实现。
+
+改动：`impl<R: Clone, C: ManualClockApi> Clone for ManualTime<R, C>`（克隆被装饰的值
+与手动时钟各一份；`ManualClock` 的克隆共享同一份时钟状态，故两个装饰器读同一时刻、
+走同一张到期表）。附带给测试替身 `support_::FakeRt_` 补上 `Clone + Copy`，
+并新增单元测试 `clone_shares_the_same_manual_clock`。
+
+性质：**公开面扩展（非破坏）**，已与人类确认。验证：`cargo test -p abs_art-mock_clock`
+→ 26 passed / 0 failed。

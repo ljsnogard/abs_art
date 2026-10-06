@@ -178,6 +178,23 @@ impl<R: TrBlockOn, C: ManualClockApi> TrBlockOn for ManualTime<R, C> {
     }
 }
 
+impl<R: Clone, C: ManualClockApi> Clone for ManualTime<R, C> {
+    /// 克隆装饰器：被装饰的值与手动时钟各克隆一份。
+    ///
+    /// [`ManualClock`] 的克隆**共享同一份时钟状态**（内部是 `Arc`），因此克隆出来的
+    /// 两个装饰器读同一个时刻、走同一张到期表——与克隆各后端的 `Runtime` 语义一致。
+    ///
+    /// 之所以需要它：`ManualTime` 是「运行时值的装饰器」，而消费方常要求运行时值
+    /// 可克隆（例如库侧把同一份运行时值分发给核心与若干循环）。各后端的 `Runtime`
+    /// 都实现了 `Clone`，本类型因此也应当实现。
+    fn clone(&self) -> Self {
+        Self {
+            inner_: self.inner_.clone(),
+            clock_: self.clock_.clone(),
+        }
+    }
+}
+
 impl<R: fmt::Debug, C: ManualClockApi> fmt::Debug for ManualTime<R, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ManualTime")
@@ -275,5 +292,23 @@ mod tests {
         let value = ManualTime::new(FakeRt_, clock.clone());
         assert_eq!(value.inner().about(), RuntimeTag::Smol);
         assert_eq!(value.into_inner().about(), RuntimeTag::Smol);
+    }
+
+    /// 目的：验证克隆出的装饰器与被克隆者**共享**同一个手动时钟。
+    ///
+    /// 手段：克隆 `ManualTime`，推进原值手上的那个 `ManualClock`，再读克隆体的 `now()`。
+    ///
+    /// 判断：克隆体读到推进后的时刻（5 s），原值同样——说明两者共享同一份时钟状态，
+    /// 而不是各持一张独立的到期表；这也正是「克隆各后端 `Runtime`」的语义。
+    #[test]
+    fn clone_shares_the_same_manual_clock() {
+        let clock = ManualClock::new();
+        let value = ManualTime::new(FakeRt_, clock.clone());
+        let cloned = value.clone();
+
+        clock.advance_by(Duration::from_secs(5));
+
+        assert_eq!(cloned.now().as_millis(), 5_000);
+        assert_eq!(value.now().as_millis(), 5_000);
     }
 }

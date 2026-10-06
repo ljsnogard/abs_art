@@ -43,6 +43,10 @@ impl<T: 'static> TrJoinHandle<T> for FakeJoin_<T> {
 }
 
 /// 假运行时：只有身份，没有调度。
+///
+/// 派生了 `Clone` / `Copy`：真实的运行时值（各后端的 `Runtime`）都可克隆，
+/// 本替身据此保持一致，才能测 [`crate::ManualTime`] 的 `Clone`。
+#[derive(Clone, Copy)]
 pub struct FakeRt_;
 
 impl TrAsyncRuntime for FakeRt_ {
