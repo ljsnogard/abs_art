@@ -8,6 +8,13 @@
 //!    tokio 的 `time::sleep` / smol 的 `Timer` / compio 的时间设施；
 //! 3. 连续多次 `delay` 可以串联成周期性节奏（tick）。
 //!
+//! # 值语义（v0.4）
+//!
+//! `delay` 是**值方法**：计时源来自传入的那个运行时值。因此业务函数接收
+//! `&DelayRt` 并调用 `rt.delay(..)`——「谁的计时器」由这个值回答，而不是由
+//! 类型参数或全局上下文回答。后续 `TrClock::now()`（另见 `TrTime`）与这里的
+//! `delay` 来自**同一个值**，二者不可能错配。
+//!
 //! # 可以做到
 //!
 //! - `delay(duration)` 产生一个 future，`await` 它至少等待 `duration`；
@@ -31,19 +38,19 @@ use bridge_tokio::{DELAY, Runtime, TrDelay};
 /// 能力声明：只请求 `delay` 一种能力（最小权限）。
 type DelayRt = Runtime<{ DELAY }>;
 
-/// 业务函数 A：睡眠至少 `ms` 毫秒，返回实际经过的毫秒数。
-async fn wait_at_least(ms: u64) -> u128 {
+/// 业务函数 A：在这个运行时值上睡眠至少 `ms` 毫秒，返回实际经过的毫秒数。
+async fn wait_at_least(rt: &DelayRt, ms: u64) -> u128 {
     let start = Instant::now();
     // TrDelay::delay 返回一个等待 duration 之后完成的 future
-    <DelayRt as TrDelay>::delay(Duration::from_millis(ms)).await;
+    rt.delay(Duration::from_millis(ms)).await;
     start.elapsed().as_millis()
 }
 
 /// 业务函数 B：连续三次短睡眠，构造 3 个 tick 的节拍。
-async fn tick_tock() -> usize {
+async fn tick_tock(rt: &DelayRt) -> usize {
     let mut ticks = 0;
     for _ in 0..3 {
-        <DelayRt as TrDelay>::delay(Duration::from_millis(1)).await;
+        rt.delay(Duration::from_millis(1)).await;
         ticks += 1;
     }
     ticks
@@ -57,8 +64,10 @@ fn main() {
         .unwrap();
 
     let (elapsed, ticks) = rt.block_on(async {
-        let elapsed = wait_at_least(10).await;
-        let ticks = tick_tock().await;
+        // 在运行时上下文内构造值：类型别名已固定 CAPS，无需 turbofish
+        let value = DelayRt::current();
+        let elapsed = wait_at_least(&value, 10).await;
+        let ticks = tick_tock(&value).await;
         (elapsed, ticks)
     });
 

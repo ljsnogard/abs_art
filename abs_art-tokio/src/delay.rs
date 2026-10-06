@@ -33,7 +33,7 @@ where
     type Delay = tokio::time::Sleep;
 
     /// 返回一个等待 `duration` 之后完成的 future。
-    fn delay(duration: Duration) -> Self::Delay {
+    fn delay(&self, duration: Duration) -> Self::Delay {
         tokio::time::sleep(duration)
     }
 }

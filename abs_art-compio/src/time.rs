@@ -1,4 +1,4 @@
-//! `time`：计时能力——周期源（[`TrInterval`]）与超时（[`TrTime`]）。
+//! `time`：计时能力——绝对时刻（[`TrClock`]）、周期源（[`TrInterval`]）与超时（[`TrTime`]）。
 //!
 //! 实现基于 compio 的 `runtime::time`。本 crate 是家族里**唯一需要 nightly** 的：
 //! compio 的睡眠 / 周期 / 超时 future 全是 `pub async fn`（不透明、不可命名），
@@ -13,19 +13,31 @@
 //!
 //! 与 `delay` 共用 `delay` feature：两者要的是同一个运行时 feature（compio 的
 //! `time`），没有拆开的必要。
+//!
+//! # [`TrClock::Instant`] 为什么是 [`std::time::Instant`]
+//!
+//! 「与计时器同源」是硬要求：tokio 后端给 `tokio::time::Instant`（`test-util` 下
+//! 可暂停），compio 后端则必须给出 compio 计时器所用的那个时刻类型。已实测
+//! （`compio-runtime-0.12.6/src/time/mod.rs`）：compio 的 `sleep_until` /
+//! `interval_at` / `Interval::tick` 全部直接使用 `std::time::Instant`，且**没有**
+//! 导出任何自己的时刻类型（该模块只 `pub use future::Interval;`）。因此
+//! `type Instant = std::time::Instant` 是唯一「同源」的选择，而不是退而求其次。
+//!
+//! 代价是本 crate 必须显式 `extern crate std;`（见 [crate 文档](crate)）；
+//! `std::time::Instant` 满足 `TrClock::Instant` 的四个结构约束
+//! （`Copy + Ord`、`Add<Duration, Output = Instant>`、`Sub<Instant, Output = Duration>`、
+//! `'static`），编译期已验证。
 
-use core::{
-    future::Future,
-    time::Duration,
-};
+use core::{future::Future, time::Duration};
 
-use abs_art::{HasDelay, TrDelay, TrInterval, TrTime};
+use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
 
 use crate::Runtime;
 
 /// 本后端的周期源（[`TrTime::Interval`] 的具体类型）。
 #[derive(Debug)]
 pub struct Interval {
+    /// compio 自己的周期源；它已经满足 `abs_art::time` 的语义契约，故只做包裹。
     inner_: compio::runtime::time::Interval,
 }
 
@@ -35,10 +47,28 @@ impl TrInterval for Interval {
 
     fn tick(&mut self) -> Self::Tick<'_> {
         async move {
-            // compio 的 `tick` 返回到期时刻（`Instant`）；本 crate 的契约不暴露
-            // `Instant`（见 `abs_art::time` 模块文档），因此丢弃返回值。
+            // compio 的 `tick` 返回到期时刻（`std::time::Instant`）；本 crate 的
+            // `TrInterval` 契约不暴露 tick 对应的时刻（见 `abs_art::time` 模块
+            // 文档），因此丢弃返回值。
             self.inner_.tick().await;
         }
+    }
+}
+
+impl<const CAPS: usize> TrClock for Runtime<CAPS>
+where
+    [(); CAPS]: HasDelay,
+{
+    /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：
+    /// `compio::runtime::time` 的 `sleep_until` / `interval_at` 形参就是
+    /// [`std::time::Instant`]，驱动也用它折算 `current_timeout`。
+    ///
+    /// 注意 compio 没有可暂停的虚拟时钟（对照 tokio 的 `test-util`），因此
+    /// `now()` 永远是墙上时钟。
+    type Instant = std::time::Instant;
+
+    fn now(&self) -> Self::Instant {
+        std::time::Instant::now()
     }
 }
 
@@ -48,32 +78,11 @@ where
 {
     type Interval = Interval;
 
-    fn interval(period: Duration) -> Self::Interval {
-        Interval {
-            inner_: compio::runtime::time::interval(period),
-        }
-    }
-}
-
-/// 让**本地作用域值**也承载一次性睡眠（[`TrDelay`]）与周期源（[`TrTime`]）。
-///
-/// 业务库手上只有作用域值（`S: TrLocalScope`），补上这两格之后写 `S: TrTime`
-/// 一个约束就够，不必再引入第二个类型参数。compio 的本地队列归运行时所有，
-/// 因此本实现**只借类型**、不读任何字段。
-#[cfg(feature = "local_scope")]
-impl TrDelay for crate::LocalScope {
-    type Delay = impl Future<Output = ()>;
-
-    fn delay(duration: Duration) -> Self::Delay {
-        compio::runtime::time::sleep(duration)
-    }
-}
-
-#[cfg(feature = "local_scope")]
-impl TrTime for crate::LocalScope {
-    type Interval = Interval;
-
-    fn interval(period: Duration) -> Self::Interval {
+    /// 构造 compio 的周期源：首次 tick 立即完成，进度锚定在构造时刻，落后时跳过。
+    ///
+    /// `period` 为零时 compio 自身 panic（文案 `` `period` must be non-zero. ``），
+    /// 与 `abs_art::time` 的契约第 5 条一致，故不再重复断言。
+    fn interval(&self, period: Duration) -> Self::Interval {
         Interval {
             inner_: compio::runtime::time::interval(period),
         }
@@ -82,14 +91,18 @@ impl TrTime for crate::LocalScope {
 
 #[cfg(test)]
 mod tests {
-    //! compio 后端的 `TrTime` 单测。
+    //! compio 后端的 `TrClock` / `TrTime` 单测。
     //!
     //! 跨三后端的一致性契约由 `abs_art-smoke` 的 `time_contract` 用例负责；这里只
-    //! 钉住「本后端能不能跑起来」这几条。
+    //! 钉住「本后端能不能跑起来」与「时刻与计时器是否同源」这几条。
 
+    use core::time::Duration;
+    // 本 crate 是 `no_std`，`core` 的 prelude 里没有 `ToString`；经
+    // `extern crate std;` 取它，免得为了断言文案引入 `alloc`。
+    use std::string::ToString;
     use std::time::Instant;
 
-    use super::*;
+    use abs_art::{TrClock, TrDelay, TrInterval, TrTime};
 
     /// 建一个 compio 运行时。
     fn rt_() -> compio::runtime::Runtime {
@@ -98,18 +111,44 @@ mod tests {
 
     /// 目的：验证 `delay` 能真正睡到（compio 的 time 驱动被驱动）。
     ///
-    /// 实施策略：在 compio 运行时里 await 1 ms 的 `delay`，量测实际耗时。
+    /// 实施策略：在 compio 运行时里构造运行时值，await 1 ms 的 `value.delay`，
+    /// 量测实际耗时。
     ///
     /// 通过依据：正常返回且耗时 `>= 1 ms`；若 time 驱动没被驱动，本用例会挂死。
     #[test]
     fn delay_completes_and_waits_at_least_the_duration() {
         let rt = rt_();
         rt.block_on(async {
+            let value = crate::current();
             let started = Instant::now();
-            <Runtime<{ crate::FULL }> as TrDelay>::delay(Duration::from_millis(1)).await;
+            value.delay(Duration::from_millis(1)).await;
             assert!(
                 started.elapsed() >= Duration::from_millis(1),
                 "delay 不该提前返回"
+            );
+        });
+    }
+
+    /// 目的：验证 [`TrClock::now`] 与计时器**同源**——即 `now()` 走的钟就是
+    /// `delay` 等待用的那个钟（不是另找一个「差不多」的时钟）。
+    ///
+    /// 实施策略：在同一运行时值上先读 `now()`，再用 `delay` 睡 5 ms，最后再读
+    /// `now()`，用 `TrClock::Instant` 的 `Sub` 计算两者之差。
+    ///
+    /// 通过依据：差值 `>= 5 ms`。若 `Instant` 与计时器不同源（例如一个用墙上
+    /// 时钟、一个用单调计数），差值会明显偏离等待时长。
+    #[test]
+    fn clock_now_shares_the_timer_basis() {
+        let rt = rt_();
+        rt.block_on(async {
+            let value = crate::current();
+            let before = value.now();
+            value.delay(Duration::from_millis(5)).await;
+            let after = value.now();
+            assert!(
+                after - before >= Duration::from_millis(5),
+                "now() 与 delay 的钟不同源：差值为 {:?}",
+                after - before
             );
         });
     }
@@ -119,13 +158,13 @@ mod tests {
     /// 实施策略：取一个 5 秒的周期，量测第一次 tick 的耗时。
     ///
     /// 通过依据：耗时远小于周期（这里取 `< 1 秒`）——compio 的 `interval` 起点取
-    /// 「现在」，因此首次 `tick` 立即就绪。
+    /// 「现在」，因此首次 `tick` 立即就绪；若被推迟一个周期，本用例会等 5 秒。
     #[test]
     fn interval_first_tick_is_immediate() {
         let rt = rt_();
         rt.block_on(async {
-            let mut period =
-                <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::from_secs(5));
+            let value = crate::current();
+            let mut period = value.interval(Duration::from_secs(5));
             let started = Instant::now();
             period.tick().await;
             assert!(
@@ -137,13 +176,36 @@ mod tests {
 
     /// 目的：验证零周期在构造点被拒绝（契约第 5 条）。
     ///
-    /// 实施策略：`#[should_panic]` 捕获 `interval(Duration::ZERO)`——compio 自身
-    /// 在 `interval_at` 上就会断言。
+    /// 实施策略：`#[should_panic]` 捕获 `value.interval(Duration::ZERO)`——compio
+    /// 自身在 `interval_at` 上就会断言。
     ///
     /// 通过依据：panic 文案含 "zero"。
     #[test]
     #[should_panic(expected = "zero")]
     fn interval_rejects_zero_period() {
-        let _ = <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::ZERO);
+        let rt = rt_();
+        rt.block_on(async {
+            let value = crate::current();
+            let _ = value.interval(Duration::ZERO);
+        });
+    }
+
+    /// 目的：验证 `TrTime::timeout`（trait 默认方法）在本后端可用，且期限先到时
+    /// 返回 `Elapsed`。
+    ///
+    /// 实施策略：用运行时值对一个永不就绪的 future 施加 5 ms 超时。
+    ///
+    /// 通过依据：结果为 `Err`，且 `Display` 文案为「期限已到」。
+    #[test]
+    fn timeout_elapses_on_a_pending_inner_future() {
+        let rt = rt_();
+        rt.block_on(async {
+            let value = crate::current();
+            let out = value
+                .timeout(Duration::from_millis(5), core::future::pending::<u8>())
+                .await;
+            let elapsed = out.expect_err("期限已到应当是错误");
+            assert_eq!(elapsed.to_string(), "期限已到");
+        });
     }
 }

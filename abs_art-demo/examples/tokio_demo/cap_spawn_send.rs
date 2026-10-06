@@ -10,6 +10,13 @@
 //! 3. **任务 panic 的错误传播**：`JoinErr` 通过句柄的关联类型 `H::JoinErr`
 //!    （`core::error::Error`）传给调用方。
 //!
+//! # 值语义（v0.4）
+//!
+//! `spawn` 是**值方法**：任务被投递到**这个值**抓住的运行时（tokio 的
+//! `Handle`）的全局工作队列上，而不是投到「当前线程恰好处于哪个运行时」。
+//! 同一个进程里存在两套运行时（例如测试二进制里 tokio 与 compio 并存）时，
+//! 「投到谁那里」由手上的值回答。`block_on` 同样打在这个值上。
+//!
 //! # 可以做到
 //!
 //! - `spawn` 一个 `Send + 'static` 的 future 到全局工作队列（多线程并行）；
@@ -25,15 +32,15 @@
 //! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（`F: 'static` 约束，
 //!   对照 `cap_block_on` 里 `block_on` 可以借用——`TrSpawnSend` 没有放松
 //!   `'static`，见 `spawn_requires_static`）；
-//! - `spawn_local` → 编译错误：`Runtime` 上**根本没有这个方法**（本地投递自
-//!   v0.3 起不由能力位承载，而是由 `LocalScope` 值承载，见
-//!   `no_spawn_local_on_runtime_type`）；
+//! - 在这里调 `spawn_local` → 编译错误：`CAPS` 里没有 `SPAWN_LOCAL` 位，
+//!   这个值不实现 `TrLocalScope`（本地投递的调用点在运行时值上，见
+//!   `spawn_local_requires_declaration` 与 `cap_spawn_local`）；
 //! - 句柄抽象只覆盖「等待/取结果」，不提供后端特有操作（如 tokio 的
 //!   `abort` 之外的取消语义）——能力边界之外的东西不在抽象层承诺内。
 
 use core::future::Future;
 
-use bridge_tokio::{BLOCK_ON, SPAWN_SEND, Runtime, TrBlockOn, TrJoinHandle, TrSpawnSend};
+use bridge_tokio::{BLOCK_ON, Runtime, SPAWN_SEND, TrBlockOn, TrJoinHandle, TrSpawnSend};
 
 /// 能力声明：`block_on` + `spawn_send`（与业务库 `CapRt` 同构的能力组合）。
 type SendRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;
@@ -50,14 +57,14 @@ where
     handle.await
 }
 
-/// 业务函数：spawn 三个任务并发计算，再聚合结果。
+/// 业务函数：在这个运行时值上 spawn 三个任务并发计算，再聚合结果。
 ///
-/// 三个任务都投递到全局工作队列，由运行时的多个 worker 线程并行执行；
-/// 返回值通过抽象的 `join_abstract` 取回，调用点没有任何后端类型泄漏。
-async fn concurrent_sum(x: i32) -> i32 {
-    let h1 = <SendRt as TrSpawnSend>::spawn(async move { x });
-    let h2 = <SendRt as TrSpawnSend>::spawn(async move { x * 2 });
-    let h3 = <SendRt as TrSpawnSend>::spawn(async move { x * 3 });
+/// 三个任务都投递到该值抓住的运行时的全局工作队列，由多个 worker 线程并行
+/// 执行；返回值通过抽象的 `join_abstract` 取回，调用点没有任何后端类型泄漏。
+async fn concurrent_sum(rt: &SendRt, x: i32) -> i32 {
+    let h1 = rt.spawn(async move { x });
+    let h2 = rt.spawn(async move { x * 2 });
+    let h3 = rt.spawn(async move { x * 3 });
     let a = join_abstract(h1).await.unwrap();
     let b = join_abstract(h2).await.unwrap();
     let c = join_abstract(h3).await.unwrap();
@@ -65,11 +72,11 @@ async fn concurrent_sum(x: i32) -> i32 {
 }
 
 /// 业务函数：任务内部 panic 时，错误通过 `JoinErr` 传播给 await 方。
-async fn panic_propagates() -> bool {
+async fn panic_propagates(rt: &SendRt) -> bool {
     async fn boom() -> i32 {
         panic!("任务爆炸");
     }
-    let h = <SendRt as TrSpawnSend>::spawn(boom());
+    let h = rt.spawn(boom());
     // JoinErr 是 core::error::Error：await 拿到的是 Result，而不是直接抛给进程
     join_abstract(h).await.is_err()
 }
@@ -81,9 +88,10 @@ fn main() {
         .unwrap();
 
     let (sum, panicked) = rt.block_on(async {
-        // 外层 tokio 上下文内再 block_on 聚合 future（块内执行 spawn 等操作）
-        let sum = <SendRt as TrBlockOn>::block_on(concurrent_sum(7));
-        let panicked = <SendRt as TrBlockOn>::block_on(panic_propagates());
+        // 在运行时上下文内构造值；块内用值上的 block_on 聚合 future
+        let value = SendRt::current();
+        let sum = value.block_on(concurrent_sum(&value, 7));
+        let panicked = value.block_on(panic_propagates(&value));
         (sum, panicked)
     });
 

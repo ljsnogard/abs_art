@@ -20,7 +20,7 @@ pub struct JoinHandle<T> {
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn about() -> abs_art::RuntimeTag {
+    fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Tokio
     }
 }
@@ -104,9 +104,7 @@ mod tests {
         Arc,
     };
 
-    use abs_art::TrJoinHandle;
-
-    use crate::Runtime;
+    use abs_art::{TrJoinHandle, TrSpawnSend};
 
     /// 目的：验证 `detach` 后任务仍在后台运行（tokio 的 drop 即 detach 语义）。
     ///
@@ -125,7 +123,8 @@ mod tests {
         let f = flag.clone();
 
         rt.block_on(async {
-            let handle = Runtime::spawn(async move {
+            let value = crate::current();
+            let handle = value.spawn(async move {
                 tokio::task::yield_now().await;
                 f.store(true, Ordering::SeqCst);
             });

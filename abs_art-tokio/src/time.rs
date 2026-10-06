@@ -2,7 +2,7 @@
 //!
 //! 实现基于 tokio 的 `time` 驱动。三样东西都是**具体类型**（不是 `impl Future`）：
 //!
-//! - 一次性睡眠：[`TrDelay::Delay`] = `tokio::time::Sleep`（在 `delay.rs` 里给出）；
+//! - 一次性睡眠：`TrDelay::Delay` = `tokio::time::Sleep`（在 `delay.rs` 里给出）；
 //! - 周期源：[`Interval`]；
 //! - `tick` 的 future：[`Tick`]——tokio 的 `Interval::tick` 是 `async fn`（不透明、
 //!   不可命名），但它另给了 `pub fn poll_tick`，于是这个包装既具体又**完全安全**。
@@ -20,7 +20,7 @@ use core::{
     time::Duration,
 };
 
-use abs_art::{HasDelay, TrDelay, TrInterval, TrTime};
+use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
 use tokio::time::MissedTickBehavior;
 
 use crate::Runtime;
@@ -56,36 +56,28 @@ impl TrInterval for Interval {
     }
 }
 
+impl<const CAPS: usize> TrClock for Runtime<CAPS>
+where
+    [(); CAPS]: HasDelay,
+{
+    /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：tokio 的时间驱动。
+    ///
+    /// `test-util` 打开时它与 `tokio::time::pause()` 一起走虚拟时间——这正是
+    /// 「同源」要保证的性质。
+    type Instant = tokio::time::Instant;
+
+    fn now(&self) -> Self::Instant {
+        tokio::time::Instant::now()
+    }
+}
+
 impl<const CAPS: usize> TrTime for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
 {
     type Interval = Interval;
 
-    fn interval(period: Duration) -> Self::Interval {
-        tokio_interval_(period)
-    }
-}
-
-/// 让**本地作用域值**也承载一次性睡眠（[`TrDelay`]）与周期源（[`TrTime`]）。
-///
-/// 业务库手上只有作用域值（`S: TrLocalScope`），补上这两格之后写 `S: TrTime`
-/// 一个约束就够，不必再引入第二个类型参数。计时源来自运行时的线程本地上下文，
-/// 不来自作用域值本身，因此本实现**只借类型**、不读任何字段。
-#[cfg(feature = "local_scope")]
-impl TrDelay for crate::LocalScope {
-    type Delay = tokio::time::Sleep;
-
-    fn delay(duration: Duration) -> Self::Delay {
-        tokio::time::sleep(duration)
-    }
-}
-
-#[cfg(feature = "local_scope")]
-impl TrTime for crate::LocalScope {
-    type Interval = Interval;
-
-    fn interval(period: Duration) -> Self::Interval {
+    fn interval(&self, period: Duration) -> Self::Interval {
         tokio_interval_(period)
     }
 }
@@ -110,6 +102,8 @@ mod tests {
 
     use std::time::Instant;
 
+    use abs_art::TrDelay;
+
     use super::*;
 
     /// 建一个开着 time 驱动的 tokio 运行时。
@@ -130,8 +124,9 @@ mod tests {
     fn delay_completes_and_waits_at_least_the_duration() {
         let rt = rt_();
         rt.block_on(async {
+            let value = Runtime::<{ crate::FULL }>::current();
             let started = Instant::now();
-            <Runtime<{ crate::FULL }> as TrDelay>::delay(Duration::from_millis(1)).await;
+            value.delay(Duration::from_millis(1)).await;
             assert!(
                 started.elapsed() >= Duration::from_millis(1),
                 "delay 不该提前返回"
@@ -149,8 +144,8 @@ mod tests {
     fn interval_first_tick_is_immediate() {
         let rt = rt_();
         rt.block_on(async {
-            let mut period =
-                <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::from_secs(5));
+            let value = Runtime::<{ crate::FULL }>::current();
+            let mut period = value.interval(Duration::from_secs(5));
             let started = Instant::now();
             period.tick().await;
             assert!(
@@ -175,13 +170,17 @@ mod tests {
 
     /// 目的：验证零周期在构造点被拒绝（契约第 5 条）。
     ///
-    /// 实施策略：`#[should_panic]` 捕获 `interval(Duration::ZERO)`——tokio 自身
-    /// 在 `interval(0)` 上就会 panic。
+    /// 实施策略：在运行时上下文内构造值，`#[should_panic]` 捕获
+    /// `value.interval(Duration::ZERO)`——tokio 自身在 `interval(0)` 上就会 panic。
     ///
     /// 通过依据：panic 文案含 "zero"。
     #[test]
     #[should_panic(expected = "zero")]
     fn interval_rejects_zero_period() {
-        let _ = <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::ZERO);
+        let rt = rt_();
+        rt.block_on(async {
+            let value = Runtime::<{ crate::FULL }>::current();
+            let _ = value.interval(Duration::ZERO);
+        });
     }
 }

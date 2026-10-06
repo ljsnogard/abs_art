@@ -2,24 +2,8 @@
 
 use core::future::Future;
 
-use tokio::runtime::Handle;
-
 use crate::Runtime;
-use abs_art::{FULL, HasBlockOn, TrBlockOn};
-
-impl Runtime<FULL> {
-    /// 阻塞当前线程，等待 `future` 完成，同时不影响 tokio 运行时的调度。
-    ///
-    /// 必须在 tokio 运行时上下文内调用（例如在 `Runtime::block_on` 或某个
-    /// 由 `tokio::spawn` 创建的任务内部）；否则 `Handle::current()` 会 panic。
-    pub fn block_on<F>(future: F) -> F::Output
-    where
-        Self: TrBlockOn,
-        F: Future,
-    {
-        <Self as TrBlockOn>::block_on(future)
-    }
-}
+use abs_art::{HasBlockOn, TrBlockOn};
 
 impl<const CAPS: usize> TrBlockOn for Runtime<CAPS>
 where
@@ -27,21 +11,33 @@ where
 {
     /// 先通过 `tokio::task::block_in_place` 把当前 worker 线程（及其任务队列）
     /// 让渡回阻塞线程池，让其他任务可以继续在该线程上被调度；再在闭包内用
-    /// `Handle::current().block_on(future)` 驱动 `future` 直到完成。
+    /// 本值抓住的句柄驱动 future 直到完成。
     ///
     /// 这是 tokio 官方文档推荐的「在多线程运行时内同步等待 async 结果」的模式：
     /// 当前线程被阻塞的同时，运行时的其他任务仍能得到调度，即「不影响运行时调度」。
     ///
-    /// 注意：`block_in_place` 不允许在 current_thread 运行时内使用（没有其他
+    /// 本地队列（若本 feature 开启）由同一次 `block_on` 一并驱动——值化之后
+    /// 「阻塞等待」与「驱动本地队列」是同一件事。
+    ///
+    /// # Panics
+    ///
+    /// `block_in_place` 不允许在 current_thread 运行时内使用（没有其他
     /// worker 线程可以承接任务），此时会 panic。
-    fn block_on<F>(future: F) -> <F as Future>::Output
+    fn block_on<F>(&self, future: F) -> <F as Future>::Output
     where
         F: Future,
     {
-        tokio::task::block_in_place(move || {
-            // 在闭包内，通过当前运行时句柄的 block_on 来等待
-            Handle::current().block_on(future)
-        })
+        #[cfg(feature = "local_scope")]
+        {
+            let handle = self.handle_.clone();
+            let local = alloc::rc::Rc::clone(&self.local_);
+            tokio::task::block_in_place(move || handle.block_on(local.run_until(future)))
+        }
+        #[cfg(not(feature = "local_scope"))]
+        {
+            let handle = self.handle_.clone();
+            tokio::task::block_in_place(move || handle.block_on(future))
+        }
     }
 }
 
@@ -69,9 +65,9 @@ mod tests {
     /// future 的最终输出。
     ///
     /// 实施策略：创建一个多线程 tokio 运行时，在最外层的 `rt.block_on` 上下文中
-    /// （此时当前线程处于「已进入运行时」状态，允许使用 `block_in_place`）调用
-    /// `Runtime::block_on` 去驱动一个返回常量表达式的 future，并把结果带出外层
-    /// `rt.block_on`。
+    /// （此时当前线程处于「已进入运行时」状态，允许使用 `block_in_place`）构造
+    /// 运行时值并调用其 `block_on` 驱动一个返回常量表达式的 future，再把结果带出
+    /// 外层 `rt.block_on`。
     ///
     /// 通过依据：外层 `rt.block_on` 的返回值等于 future 的计算结果（1 + 2 == 3），
     /// 且整个过程没有 panic。
@@ -81,7 +77,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let out = rt.block_on(async { Runtime::block_on(async { 1 + 2 }) });
+        let out = rt.block_on(async {
+            let value = crate::current();
+            value.block_on(async { 1 + 2 })
+        });
 
         assert_eq!(out, 3);
     }
@@ -90,9 +89,9 @@ mod tests {
     /// `tokio::spawn` 创建的任务内部）正常使用，而不只是在外层 `rt.block_on`
     /// 的上下文里可用。
     ///
-    /// 实施策略：先 `tokio::spawn` 一个任务，该任务内部调用 `Runtime::block_on`
-    /// （此时当前线程是运行时的 worker 线程），随后在外层 `rt.block_on` 中 await
-    /// 该任务的 JoinHandle 取回结果。
+    /// 实施策略：先 `tokio::spawn` 一个任务，该任务内部构造运行时值并调用其
+    /// `block_on`（此时当前线程是运行时的 worker 线程），随后在外层 `rt.block_on`
+    /// 中 await 该任务的 JoinHandle 取回结果。
     ///
     /// 通过依据：JoinHandle 的 await 结果成功（`Ok`）且等于 40 + 2 == 42；
     /// 同时证明在 worker 线程内调用不会 panic。
@@ -103,7 +102,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let task = rt.spawn(async { Runtime::block_on(async { 40 + 2 }) });
+        let task = rt.spawn(async {
+            let value = crate::current();
+            value.block_on(async { 40 + 2 })
+        });
         let out = rt.block_on(async { task.await.unwrap() });
 
         assert_eq!(out, 42);
@@ -114,8 +116,8 @@ mod tests {
     ///
     /// 实施策略：创建一个只有 1 个 worker 线程的多线程运行时，让当前线程通过
     /// `rt.block_on` 充当该 worker；先 `tokio::spawn` 一个后台任务，它在循环中
-    /// 递增原子计数器并 `yield_now`；随后调用 `Runtime::block_on` 阻塞等待计数器
-    /// 达到目标值。若实现没有通过 `block_in_place` 把 worker 让渡出去，后台任务
+    /// 递增原子计数器并 `yield_now`；随后在运行时上下文内构造值并调用其 `block_on`
+    /// 阻塞等待计数器达到目标值。若实现没有通过 `block_in_place` 把 worker 让渡出去，后台任务
     /// 将永远得不到调度，等待循环将无法退出（死锁）。
     ///
     /// 通过依据：整个场景被放到一个独立线程中执行，并用 `recv_timeout` 限制等待
@@ -145,7 +147,8 @@ mod tests {
                 });
 
                 let wait_counter = counter.clone();
-                Runtime::block_on(async move {
+                let value = crate::current();
+                value.block_on(async move {
                     while wait_counter.load(Ordering::Relaxed) < TARGET {
                         tokio::task::yield_now().await;
                     }
@@ -164,28 +167,27 @@ mod tests {
         assert_eq!(count, TARGET);
     }
 
-    /// 目的：验证在没有任何 tokio 运行时上下文的线程中调用 `Runtime::block_on`
-    /// 会 panic——tokio 实现依赖 `Handle::current()` 获取环境运行时，而该函数在
-    /// 没有环境运行时的情况下必然 panic。这固定了「必须处于运行时上下文内」的
-    /// 使用契约。
+    /// 目的：验证在没有任何 tokio 运行时上下文的线程中**构造**运行时值会 panic
+    /// ——值需要 `Handle::current()`，而该函数在没有环境运行时的情况下必然 panic。
+    /// 这固定了「运行时值必须来自某个真实运行时」的使用契约（v0.3 的 ZST 没有这条
+    /// 约束，代价是值不再指向任何具体运行时）。
     ///
     /// 实施策略：不创建也不进入任何 tokio 运行时，直接在测试线程中调用
-    /// `Runtime::block_on`。
+    /// `Runtime::current()`。
     ///
     /// 通过依据：测试按预期捕获 panic（`expected = "no reactor running"` 匹配
-    /// `Handle::current()` 的 panic 信息）即为通过；若没有 panic（即实现静默地
-    /// 创建了新的运行时或返回了结果），则测试失败，说明实现与契约不符。
+    /// `Handle::current()` 的 panic 信息）即为通过；若没有 panic，则测试失败。
     #[test]
     #[should_panic(expected = "no reactor running")]
-    fn block_on_outside_runtime_panics() {
-        Runtime::block_on(async { 42 });
+    fn current_outside_runtime_panics() {
+        let _ = crate::current();
     }
 
     /// 目的：验证 Tag 模式下，声明了 `BLOCK_ON` 能力的 `Runtime<Caps>` 确实
     /// 实现了 `TrBlockOn`（编译期能力检查的正向用例）。
     ///
     /// 实施策略：用 `Runtime::<{ BLOCK_ON | SPAWN_SEND }>` 调用 `current()`
-    /// 取得标记值，再通过 trait 关联函数调用 `block_on` 驱动一个 future。
+    /// 取得运行时值，再通过 trait 方法调用 `block_on` 驱动一个 future。
     ///
     /// 通过依据：返回值为 40 + 2 == 42；若 `HasBlockOn` 标记或条件化 trait
     /// impl 有误，将无法编译。
@@ -196,9 +198,8 @@ mod tests {
             .unwrap();
 
         let out = rt.block_on(async {
-            <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrBlockOn>::block_on(async {
-                40 + 2
-            })
+            let value = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
+            value.block_on(async { 40 + 2 })
         });
         assert_eq!(out, 42);
     }

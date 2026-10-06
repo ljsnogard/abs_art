@@ -7,7 +7,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use abs_art::{runtime::TrJoinHandle, TrAsyncRuntime};
+use abs_art::{TrAsyncRuntime, runtime::TrJoinHandle};
 
 use crate::Runtime;
 
@@ -17,11 +17,20 @@ pub struct JoinHandle<T> {
 }
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
+///
+/// `about` 收 `&self`（v0.4 的值化形状）：身份由运行时值报告，而不是由类型报告。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn about() -> abs_art::RuntimeTag {
+    fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Compio
+    }
+}
+
+impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
+    #[inline]
+    fn from(handle: compio::runtime::JoinHandle<T>) -> Self {
+        JoinHandle { inner: handle }
     }
 }
 
@@ -38,13 +47,6 @@ where
     /// `cancel(true)` 取消任务——必须显式调用原生 `detach`。
     fn detach(self) {
         self.inner.detach();
-    }
-}
-
-impl<T> From<compio::runtime::JoinHandle<T>> for JoinHandle<T> {
-    #[inline]
-    fn from(handle: compio::runtime::JoinHandle<T>) -> Self {
-        JoinHandle { inner: handle }
     }
 }
 
@@ -102,20 +104,17 @@ mod tests {
         Arc,
     };
 
+    use abs_art::{TrJoinHandle, TrSpawnSend};
     use compio::runtime::Runtime as CompioRuntime;
-
-    use abs_art::TrJoinHandle;
-
-    use crate::Runtime;
 
     /// 目的：验证 `detach` 后任务仍在 compio 运行时的工作队列里推进。
     ///
-    /// 实施策略：`Runtime::spawn` 一个设置 `AtomicBool` 的任务，`detach`
-    /// 句柄（不 await），然后 `sleep` 让出——compio 的 `block_on` 在等待
-    /// 期间会 tick 运行时队列，detach 的任务因此有机会执行并置位。
+    /// 实施策略：经运行时值 `spawn` 一个设置 `AtomicBool` 的任务，`detach` 句柄
+    /// （不 await），再 `sleep` 让出——compio 的 `block_on` 在等待期间会 tick
+    /// 运行时队列，detach 的任务因此有机会执行并置位。
     ///
-    /// 通过依据：标志在 `block_on` 返回前被置位——若 detach 实现错误地触发
-    /// 了取消（compio JoinHandle 的 drop 会 cancel），标志永远不会置位。
+    /// 通过依据：标志在 `block_on` 返回前被置位——若 detach 实现错误地触发了取消
+    /// （compio `JoinHandle` 的 drop 会 cancel），标志永远不会置位。
     #[test]
     fn detach_keeps_task_running() {
         let rt = CompioRuntime::new().unwrap();
@@ -123,7 +122,8 @@ mod tests {
         let f = flag.clone();
 
         rt.block_on(async {
-            let handle = Runtime::spawn(async move {
+            let value = crate::current();
+            let handle = value.spawn(async move {
                 f.store(true, Ordering::SeqCst);
             });
             handle.detach();

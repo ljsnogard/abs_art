@@ -16,10 +16,20 @@ abs_art-compio = { path = "../abs_art-compio", optional = true, version = "0.3.0
 abs_art-smol   = { path = "../abs_art-smol", optional = true, version = "0.3.0" }
 
 [features]
-# 通过 Cargo.toml 选择后端（必须且只能启用一个）
+# 链接哪些后端（可以同时启用多个）。
 backend-compio = ["dep:abs_art-compio"]
 backend-tokio = ["dep:abs_art-tokio"]
 backend-smol = ["dep:abs_art-smol"]
+
+# 声明**默认**后端（裸名 Runtime / current 指向谁）。
+#
+# 只有启用**多个** backend 时才需要显式声明：`cargo test --workspace` 会把各成员的
+# feature 取并集，若此时没有声明默认，裸名会按优先级悄悄选中一个——很可能是错的
+# 那个（实测：应用明明要 smol，却因为并集里还有 tokio 而走了 tokio 路径，运行期
+# panic）。因此本 crate 选择「多后端时必须显式声明，否则编译失败」。
+default-backend-compio = ["backend-compio"]
+default-backend-tokio = ["backend-tokio"]
+default-backend-smol = ["backend-smol"]
 
 # 缺省后端 = tokio。
 #
@@ -36,3 +46,7 @@ backend-smol = ["dep:abs_art-smol"]
 #
 #   abs_art-bridge = { ..., default-features = false, features = ["backend-smol"] }
 default = ["backend-tokio"]
+
+# 仅测试用：桥接 crate 的烟雾测试需要一个真实运行时来驱动 tokio 后端。
+[dev-dependencies]
+tokio = { workspace = true }

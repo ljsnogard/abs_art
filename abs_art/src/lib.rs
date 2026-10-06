@@ -2,19 +2,19 @@
 //!
 //! 本 crate **不依赖任何异步运行时**，只提供：
 //!
-//! - [`runtime::Runtime`]：抽象的运行时标签；
-//! - [`runtime`] 中的一组能力 trait（`TrBlockOn` / `TrSpawnSend`
-//!   / `TrSpawnBlocking` / `TrDelay`）与值化的本地作用域 trait
-//!   [`TrLocalScope`]；
-//! - [`time`]：计时能力 trait（[`TrTime`] / [`TrInterval`]）与超时失败类型
-//!   [`Elapsed`]、以及在后端之上组合出超时的自由函数 [`timeout`]；
+//! - [`runtime::RuntimeTag`]：抽象的运行时身份标签；
+//! - [`runtime`] 中的一组**值化**能力 trait（`TrAsyncRuntime` / `TrBlockOn` /
+//!   `TrSpawnSend` / `TrSpawnBlocking` / `TrDelay` / `TrLocalScope`）：它们的
+//!   方法都收 `&self`，由**运行时值**提供能力；
+//! - [`time`]：计时能力 trait（[`TrClock`] / [`TrTime`] / [`TrInterval`]）与超时
+//!   失败类型 [`Elapsed`]、以及组合出超时的具体类型 [`Timeout`]；
 //! - [`caps`]：能力位掩码与类型级标记，供组合 crate 的 `Runtime<const CAPS>`
 //!   做编译期能力检查。
 //!
 //! 注意**本地投递是「位 + 值」两件套**：能力位 [`SPAWN_LOCAL`] 只负责
-//! **声明**（想用就必须写下来，使这次升级可被审查），真正能不能投递则由值
-//! [`TrLocalScope`] 决定（它携带环境前提：本地队列存在且有人驱动）。两者的职责
-//! 分工见 [`caps`] 模块文档。
+//! **声明**（想用就必须写下来，使这次升级可被审查），真正能不能投递则由
+//! **运行时值**决定（它携带环境前提：本地队列存在且有人驱动）。两者的职责
+//! 分工见 [`caps`] 与 [`TrLocalScope`] 的文档。
 //!
 //! 具体的运行时实现由组合 crate 提供：
 //!
@@ -24,6 +24,13 @@
 //!
 //! 每个组合 crate 都把 `block_on` / `delay` / `spawn_send` / `local_scope` /
 //! `spawn_blocking` 五个功能做成 feature 开关，用户按需启用。
+//!
+//! # v0.4：能力收 `&self`，运行时**值化**
+//!
+//! 运行时不再只是类型标签：它是有能力（并且可能需要）的**值**。业务库把
+//! `&R`（`R: TrSpawnSend + TrTime + …`）拿在手上，`spawn` / `delay` / `now` /
+//! `spawn_local` 都作用在**这一个值**上，因此「哪条本地队列、哪个时钟」不再可能
+//! 被指向别处。设计因果链见 `dev-notes/`。
 
 #![no_std]
 
@@ -42,4 +49,4 @@ pub use runtime::{
     RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend,
 };
-pub use time::{Elapsed, Timeout, TrInterval, TrTime, UnitFuture};
+pub use time::{Elapsed, Timeout, TrClock, TrInterval, TrTime, UnitFuture};

@@ -1,173 +1,77 @@
-//! `local_scope`：值化的本地作用域——本地队列（`LocalSet`）的持有者与驱动点。
+//! `local_scope`：本地队列由**运行时值**持有——投递点与驱动点都是这个值。
 //!
 //! # 为什么是这个形状
 //!
 //! tokio 的 `spawn_local` 有三条硬约束：
 //!
-//! 1. `tokio::task::spawn_local`（自由函数）**必须在 `LocalSet` 上下文内**调用，
-//!    否则 panic——纯类型参数表达不了这条环境前提；
-//! 2. 本地队列归调用方的 [`LocalSet`] 所有，**必须由调用方驱动**；
+//! 1. 本地任务必须投递到**某一条** `LocalSet` 上；
+//! 2. 本地队列归 `LocalSet` 的持有者所有，**必须由持有者驱动**；
 //! 3. `LocalSet` 是 `!Send` 的，绑定创建它的线程。
 //!
-//! 因此本后端提供 [`LocalScope`]：它就是那个 `LocalSet` 的持有者，同时是投递点与
-//! 驱动点。投递走**方法版** [`LocalSet::spawn_local`]——它在 `LocalSet` 未运行时
-//! 也能投递且不 panic，正是「先建作用域、后驱动」这个用法需要的语义。
+//! v0.3 把队列做成一个**独立的作用域值**（`LocalScope`），于是「驱动谁」与
+//! 「用哪个运行时」是两件事，调用方要分别记住。v0.4 把它并回 [`Runtime`]：
+//! 值本身就是队列的持有者与驱动点，
+//!
+//! - 投递走方法版 [`LocalSet::spawn_local`]——它在 `LocalSet` 未运行时也能投递且
+//!   不 panic，正是「先建队列、后驱动」这个用法需要的语义；
+//! - 驱动走 [`TrLocalScope::run_until`]（异步）或
+//!   [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on)（阻塞，见 `block_on.rs`）；
+//! - 克隆运行时值即共享**同一条**队列（`Rc<LocalSet>`）。
 
-use alloc::rc::Rc;
 use core::future::Future;
 
 use abs_art::{HasSpawnLocal, TrLocalScope};
-use tokio::task::LocalSet;
 
-use crate::{Runtime, join_handle::JoinHandle};
+use crate::{JoinHandle, Runtime};
 
-/// 值化的本地作用域（tokio 后端）。
-///
-/// 内部持有一个 `Rc<LocalSet>`：本地队列随本值存活，**不随任务句柄存活**——
-/// 因此 [`TrJoinHandle::detach`](abs_art::TrJoinHandle::detach) 之后任务仍会被
-/// 持续驱动，直到它自己结束。克隆本值即共享同一条本地队列。
-pub struct LocalScope {
-    local_: Rc<LocalSet>,
-}
-
-impl LocalScope {
-    /// 创建本地作用域（内部新建一条本地队列）。
-    ///
-    /// `LocalSet` 绑定创建它的线程，因此本值以及投递到它上面的所有任务，
-    /// 都只在当前线程上运行。
-    ///
-    /// 这是**不经声明**的直接入口，集成方常用。业务库若要显式声明依赖，应改用
-    /// [`Runtime::local_scope`]（它会要求能力位含 `SPAWN_LOCAL`）。
-    pub fn new() -> Self {
-        Self {
-            local_: Rc::new(LocalSet::new()),
-        }
-    }
-}
-
-impl<const CAPS: usize> Runtime<CAPS>
+impl<const CAPS: usize> TrLocalScope for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnLocal,
 {
-    /// 声明式地取得本地作用域（「声明 → 取得」的串联点）。
-    ///
-    /// # 为什么有这个入口
-    ///
-    /// [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL) 能力位是一句**写在代码上的声明**：
-    /// 它拦不住真想用本地投递的人，但强制他把这件事写下来，于是这次「升级」必然
-    /// 出现在类型别名、diff 与 code review 里。本关联函数要求 `CAPS` 含该位——
-    /// 想经它拿到作用域值，就得先写下那位。
-    ///
-    /// 注意这不是安全边界：[`LocalScope::new`] 仍是公开入口，绕过声明依然可行。
-    /// 声明位的价值是「**必须写下来**」，不是「写不下来就用不了」。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use abs_art::TrLocalScope;
-    /// use abs_art_tokio::{Runtime, SPAWN_LOCAL};
-    ///
-    /// let rt = tokio::runtime::Builder::new_current_thread()
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// // 声明了 SPAWN_LOCAL，才能经这个入口取得作用域
-    /// let scope = Runtime::<{ SPAWN_LOCAL }>::local_scope();
-    ///
-    /// let out = rt.block_on(scope.run_until(async {
-    ///     let rc = std::rc::Rc::new(6u32);
-    ///     scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-    /// }));
-    /// assert_eq!(out, 42);
-    /// ```
-    pub fn local_scope() -> LocalScope {
-        LocalScope::new()
-    }
-}
+    /// 本后端的本地任务句柄：与全局 `spawn` 共用同一个 [`JoinHandle`]。
+    type Handle<T> = JoinHandle<T> where T: 'static;
 
-impl Default for LocalScope {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clone for LocalScope {
-    fn clone(&self) -> Self {
-        Self {
-            local_: Rc::clone(&self.local_),
-        }
-    }
-}
-
-impl core::fmt::Debug for LocalScope {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("LocalScope").finish_non_exhaustive()
-    }
-}
-
-impl TrLocalScope for LocalScope {
-    type Handle<T>
-        = JoinHandle<T>
-    where
-        T: 'static;
-
-    /// 投递到本作用域的本地队列。
+    /// 把 `future` 投递到**本值**的本地队列。
     ///
-    /// 走 [`LocalSet::spawn_local`]（方法版）而非自由函数：方法版**不要求**
-    /// `LocalSet` 正在运行，也不需要进入 `LocalSet` 上下文，因此不会 panic。
+    /// 队列随本值存活，**不随任务句柄存活**——因此
+    /// [`TrJoinHandle::detach`](abs_art::TrJoinHandle::detach) 之后任务仍会被
+    /// 持续驱动，直到它自己结束。
     fn spawn_local<F>(&self, future: F) -> Self::Handle<F::Output>
     where
         F: Future + 'static,
-        F::Output: 'static,
+        <F as Future>::Output: 'static,
     {
         self.local_.spawn_local(future).into()
     }
 
-    /// 驱动本地队列直到 `future` 完成。
+    /// 驱动**本值**的本地队列，直到 `future` 完成。
     ///
-    /// 需要外层已有一个 tokio 运行时在驱动本 future——典型写法是
-    /// `rt.block_on(scope.run_until(fut))`。
-    fn run_until<F>(&self, future: F) -> impl Future<Output = F::Output>
+    /// 返回的 future 需要放在「已处于该 tokio 运行时上下文」的位置 await
+    /// （典型：`rt.block_on(value.run_until(fut))`）。
+    fn run_until<F>(&self, future: F) -> impl Future<Output = <F as Future>::Output>
     where
         F: Future,
     {
         self.local_.run_until(future)
     }
-
-    /// 阻塞当前线程，驱动本地队列直到 `future` 完成。
-    ///
-    /// 与 abs_art-tokio 的 [`TrBlockOn`](abs_art::TrBlockOn) 前提一致：
-    /// **多线程运行时**且调用点已处于运行时上下文内。实现先经
-    /// `block_in_place` 让渡当前 worker，再用 `Handle::block_on` 驱动
-    /// [`run_until`](Self::run_until)——于是等待期间本地队列持续被推进。
-    fn block_on<F>(&self, future: F) -> F::Output
-    where
-        F: Future,
-    {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.local_.run_until(future))
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    //! 针对 tokio 后端 [`LocalScope`] 的单元测试。
+    //! 针对 tokio 后端「运行时值持有本地队列」的单元测试。
 
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, rc::Rc, time::Duration};
 
-    use abs_art::{TrJoinHandle, TrLocalScope};
+    use abs_art::{SPAWN_LOCAL, TrDelay, TrJoinHandle, TrLocalScope};
 
-    use crate::LocalScope;
+    use crate::Runtime;
 
-    /// 目的：验证 `run_until` 在等待传入 future 期间持续驱动本地队列，且结果能经
-    /// 句柄取回。
+    /// 目的：验证 `run_until` 会驱动**本值**的本地队列，`!Send` 任务能跑完。
     ///
-    /// 实施策略：用 current_thread 运行时驱动 `scope.run_until(..)`，在其中投递一个
-    /// 捕获 `Rc` 的 `!Send` 任务并 await 其句柄。
+    /// 实施策略：在 current_thread tokio 运行时里构造运行时值，投递一个捕获
+    /// `Rc<u32>` 的本地任务，用 `run_until` 驱动并 await 其句柄。
     ///
-    /// 通过依据：取回 `6 * 7 == 42`；若 `run_until` 没有驱动本地队列，await 会永久
-    /// 挂起。
+    /// 通过依据：取回 `6 * 7 == 42`；若队列没有被驱动，await 会永久挂起。
     #[test]
     fn run_until_drives_local_tasks() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -176,11 +80,11 @@ mod tests {
             .unwrap();
 
         let out = rt.block_on(async {
-            let scope = LocalScope::new();
-            scope
+            let value = crate::current();
+            value
                 .run_until(async {
                     let rc = Rc::new(6u32);
-                    let handle = scope.spawn_local(async move { *rc * 7 });
+                    let handle = value.spawn_local(async move { *rc * 7 });
                     handle.await.unwrap()
                 })
                 .await
@@ -189,27 +93,29 @@ mod tests {
         assert_eq!(out, 42);
     }
 
-    /// 目的：验证本地队列归作用域所有——`detach()` 消费句柄后任务仍继续运行。
+    /// 目的：验证本地队列归运行时值所有——`detach()` 消费句柄后任务仍继续运行。
     ///
-    /// 实施策略：在多线程运行时上下文内用 `scope.block_on` 驱动；投递一个置位
+    /// 实施策略：在多线程运行时上下文内用 `value.block_on` 驱动；投递一个置位
     /// `Rc<Cell<bool>>` 的本地任务后立即 `detach()`，再循环 `yield_now` 等标志置位。
     ///
     /// 通过依据：标志在有限次让出内被置位；若实现把队列绑在句柄上（drop 即取消），
     /// 循环会因超出上限而断言失败。
     #[test]
     fn detach_keeps_local_task_running() {
+        use abs_art::TrBlockOn;
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
 
         rt.block_on(async {
-            let scope = LocalScope::new();
-            scope.block_on(async {
+            let value = crate::current();
+            value.block_on(async {
                 let flag = Rc::new(Cell::new(false));
-                let task_flag = flag.clone();
+                let task_flag = Rc::clone(&flag);
 
-                let handle = scope.spawn_local(async move {
+                let handle = value.spawn_local(async move {
                     tokio::task::yield_now().await;
                     task_flag.set(true);
                 });
@@ -225,28 +131,97 @@ mod tests {
         });
     }
 
-    /// 目的：验证「声明 → 取得」路径——`Runtime::<{ SPAWN_LOCAL }>::local_scope()`
-    /// 取得的作用域确实可用。
+    /// 目的：验证「声明能力位」路径——只写 `SPAWN_LOCAL` 的运行时值确实可用本地投递。
     ///
-    /// 实施策略：只声明 `SPAWN_LOCAL` 一位的 `Runtime` 上调 `local_scope()`，再用
-    /// `run_until` 驱动一个捕获 `Rc` 的 `!Send` 任务。
+    /// 实施策略：把 CAPS 写成只含 `SPAWN_LOCAL`，在 tokio 运行时里构造值并跑一个
+    /// 捕获 `Rc` 的 `!Send` 任务。
     ///
-    /// 通过依据：交回 `6 * 7 == 42`；若 `HasSpawnLocal` 的门控写错（例如标在别的
+    /// 通过依据：取回 `6 * 7 == 42`；若 `HasSpawnLocal` 的门控写错（例如标在别的
     /// 位上），本测试将无法编译。
     #[test]
-    fn declared_cap_gives_usable_scope() {
-        use abs_art::SPAWN_LOCAL;
+    fn declared_cap_gives_usable_local_queue() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        let out = rt.block_on(async {
+            let value = Runtime::<{ SPAWN_LOCAL }>::current();
+            value
+                .run_until(async {
+                    let rc = Rc::new(6u32);
+                    value.spawn_local(async move { *rc * 7 }).await.unwrap()
+                })
+                .await
+        });
+
+        assert_eq!(out, 42);
+    }
+
+    /// 目的：验证同一个运行时值的两个克隆共享**同一条**本地队列。
+    ///
+    /// 实施策略：克隆值，用克隆体投递任务，用原值驱动，再 await 句柄。
+    ///
+    /// 通过依据：取回 5——若两个克隆各有各的队列，驱动原值不会推进克隆体投递的
+    /// 任务，await 会挂起。
+    #[test]
+    fn clones_share_one_local_queue() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let out = rt.block_on(async {
+            let value = crate::current();
+            let clone = value.clone();
+            let handle = clone.spawn_local(async { 5u32 });
+            value.run_until(handle).await.unwrap()
+        });
+
+        assert_eq!(out, 5);
+    }
+
+    /// 目的：验证本地投递与 `delay` 在**同一个值**上协同工作。
+    ///
+    /// 实施策略：在 `run_until` 内先 `delay` 1ms，再读墙上时钟的耗时。
+    ///
+    /// 通过依据：耗时 ≥ 1ms。
+    #[test]
+    fn delay_works_inside_local_driver() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let elapsed = rt.block_on(async {
+            let value = crate::current();
+            let start = std::time::Instant::now();
+            value
+                .run_until(async {
+                    value.delay(Duration::from_millis(1)).await;
+                })
+                .await;
+            start.elapsed()
+        });
+
+        assert!(elapsed >= Duration::from_millis(1), "耗时为 {elapsed:?}");
+    }
+
+    /// 目的：验证 `TrLocalScope::Handle` 与 `crate::JoinHandle` 是同一个类型。
+    ///
+    /// 实施策略：把 `spawn_local` 交回的句柄直接传给一个形参类型为
+    /// `crate::JoinHandle<u32>` 的函数。
+    ///
+    /// 通过依据：编译通过即为通过（类型相等）。
+    #[test]
+    fn handle_type_is_the_shared_join_handle() {
+        fn take_handle_(_: crate::JoinHandle<u32>) {}
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let scope = crate::Runtime::<{ SPAWN_LOCAL }>::local_scope();
-
-        let out = rt.block_on(scope.run_until(async {
-            let rc = Rc::new(6u32);
-            scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-        }));
-
-        assert_eq!(out, 42);
+        rt.block_on(async {
+            let value = crate::current();
+            take_handle_(value.spawn_local(async { 1u32 }));
+        });
     }
 }

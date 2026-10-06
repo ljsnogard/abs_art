@@ -3,19 +3,7 @@
 use core::future::Future;
 
 use crate::{join_handle::JoinHandle, Runtime};
-use abs_art::{FULL, HasSpawnSend, TrSpawnSend};
-
-impl Runtime<FULL> {
-    /// 把 `future` 投递到 tokio 的全局工作队列，返回 [`JoinHandle`]。
-    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
-    where
-        Self: TrSpawnSend,
-        F: Future + Send + 'static,
-        <F as Future>::Output: Send + 'static,
-    {
-        tokio::task::spawn(future).into()
-    }
-}
+use abs_art::{HasSpawnSend, TrSpawnSend};
 
 impl<const CAPS: usize> TrSpawnSend for Runtime<CAPS>
 where
@@ -23,12 +11,12 @@ where
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
-    fn spawn<F>(future: F) -> Self::JoinHandle<F::Output>
+    fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         <F as Future>::Output: Send + 'static,
     {
-        tokio::task::spawn(future).into()
+        self.handle_.spawn(future).into()
     }
 }
 
@@ -36,13 +24,13 @@ where
 mod tests {
     //! 针对 tokio 后端的 `spawn_send` 功能单元测试。
 
-    use crate::Runtime;
+    use abs_art::TrSpawnSend;
 
     /// 目的：验证 `Runtime::spawn` 能把 future 投递到 tokio 全局队列，并通过
     /// 返回的 [`JoinHandle`](crate::JoinHandle) 取回结果。
     ///
-    /// 实施策略：创建多线程 tokio 运行时，在 `rt.block_on` 中调用
-    /// `Runtime::spawn`，await 其 JoinHandle。
+    /// 实施策略：创建多线程 tokio 运行时，在 `rt.block_on` 中构造运行时值并调用
+    /// 其 `spawn`，await 其 JoinHandle。
     ///
     /// 通过依据：JoinHandle 结果为 `Ok(6 * 7 == 42)`。
     #[test]
@@ -52,7 +40,8 @@ mod tests {
             .unwrap();
 
         let out = rt.block_on(async {
-            let handle = Runtime::spawn(async { 6 * 7 });
+            let value = crate::current();
+            let handle = value.spawn(async { 6 * 7 });
             handle.await.unwrap()
         });
 

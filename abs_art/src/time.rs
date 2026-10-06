@@ -4,31 +4,39 @@
 //! crate（tokio / compio / smol）用各自的运行时提供，与 `block_on` / `delay` /
 //! `spawn_*` 的「声明在 `abs_art`、实现在后端」是同一套分工。
 //!
-//! # 与 [`TrDelay`](crate::TrDelay) 的关系
+//! # 与 [`TrDelay`] 的关系
 //!
-//! [`TrDelay`](crate::TrDelay) 是**最小原语**（睡一段），本模块是它上面那层
+//! [`TrDelay`] 是**最小原语**（睡一段），本模块是它上面那层
 //! **可用形状**：周期源与超时。两者的能力位共用 [`DELAY`](crate::DELAY)：
 //! 后者只是「本后端具备计时能力」的声明位，而 `delay` 与 `interval` 在各后端
 //! 来自**同一个**运行时 feature（tokio 的 `time`、compio 的 `time`、smol 的
 //! `Timer`），没有拆成两位的必要。
 //!
-//! # 为什么这里**没有** `sleep_until` / `interval_at` / `timeout_at`
+//! # 「绝对时刻」由 [`TrClock`] 提供，且与计时**同源**
 //!
-//! 这三个都要求「**绝对时刻**」，也就是要求一个 `Instant` 类型。而 `abs_art` 是
-//! `no_std`、零依赖的基础抽象 crate：它既不能写 `std::time::Instant`，也不该为此
-//! 引入一个外部的时钟抽象 crate（那会让该 crate 变成 `abs_art` 的公开依赖）。
+//! v0.4 起本模块新增 [`TrClock`]：它给出 `now()` 与一个**结构约束**表达的
+//! `Instant` 类型，并成为 [`TrTime`] 的超 trait。两条理由：
 //!
-//! 因此本模块把这个决定留给**持有自己的时钟**的消费方，而它们本来就需要一个
-//! 时钟（连接级 epoch、每子流「最后活动」毫秒等记账都要它）。三者都是**可推导**的：
+//! 1. **同源**：`TrTime: TrDelay + TrClock` 意味着「拥有周期能力」的值**必然**
+//!    也能报时刻，而且报的是**它自己**的时刻。v0.3 的时代钟是消费方配置项
+//!    （`TrConnCfg::Clock`），与后端的计时器没有任何结构性绑定——tokio 的
+//!    `start_paused` 虚拟时间下，「睡在虚拟时钟上、读在墙上时钟上」会让空闲超时
+//!    永远不触发（实测见 `dev-notes/runtime-tag-scope-clock-20261006-0923.md` §3.3）。
+//! 2. **不引入外部依赖**：`Instant` 是**关联类型**，用的是 `core::ops::{Add, Sub}`
+//!    与 `core::time::Duration`，`abs_art` 仍然 `no_std`、零依赖，也不必与
+//!    `embedded-timers` 之类争「谁的 `Instant` trait 说了算」。
+//!
+//! 绝对形式因此仍是**可推导**的（本模块刻意不重复提供它们）：
 //!
 //! ```text
-//! sleep_until(t)  ≡  sleep(t − clock.now())
-//! timeout_at(t)   ≡  TrTime::timeout(t − clock.now(), future)
-//! interval_at(s)  ≡  sleep(s − clock.now()) 之后接 interval(period)
+//! sleep_until(t)  ≡  delay(t − rt.now())
+//! timeout_at(t)   ≡  rt.timeout(t − rt.now(), future)
+//! interval_at(s)  ≡  delay(s − rt.now()) 之后接 rt.interval(period)
 //! ```
 //!
-//! 好处有两个：`abs_art` 不必再养一套与 `embedded-timers` 之类重复的时钟抽象；
-//! 而**消费方可以注入假时钟**——这正是「超时与宽限期可确定性验收」的前提。
+//! **可注入性转移到「运行时值」上**：要假时钟，就构造一个假的运行时值
+//! （实现 [`TrDelay`] + [`TrClock`]，二者必然一致），而不是给真后端配一个外来时钟。
+//! 这正是确定性验收需要的形状，而且它在结构上杜绝了「真计时器 + 假时钟」的错配。
 //!
 //! # 语义契约（三个后端必须一致）
 //!
@@ -55,24 +63,80 @@ use core::{
     fmt,
     future::Future,
     marker::PhantomPinned,
+    ops::{Add, Sub},
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
 
+/// 后端的**取时能力**：现在几点。
+///
+/// 它是 [`TrTime`] 的超 trait——「能等」的能力由 [`TrDelay`] 给，「等多久」的
+/// 参照由本 trait 给，两者必须来自**同一个运行时值**，否则「睡在虚拟时钟上、
+/// 读在墙上时钟上」这类错配在类型层面无法察觉（v0.3 的实测反例见
+/// `dev-notes/runtime-tag-scope-clock-20261006-0923.md` §3.3）。
+///
+/// # 为什么 `Instant` 是**结构约束**而不是本 crate 自己的一条 trait
+///
+/// `std::time::Instant`、`tokio::time::Instant`、`embedded-timers` 的 tick 计数器
+/// 都满足下面这组约束（已实测），因此 `abs_art` 既不必依赖它们，也不与
+/// `embedded-timers` 之类重复定义「什么是一刻」。四条约束各自的用途：
+///
+/// - `Copy + Ord`：可以自由复制、可以比较先后；
+/// - `Add<Duration, Output = Self>`：`deadline = now + timeout`；
+/// - `Sub<Self, Output = Duration>`：`剩余 = deadline − now`（**elapsed / deadline
+///   的唯一原语**，去掉它就没有别的算法表达「还有多久」）；
+/// - `'static`：关联类型不能借外部生命周期（去掉它对三个真实候选没有收益）。
+///
+/// # 为什么 `abs_art` 里没有它的**实现**
+///
+/// 本 crate 是 `no_std` + 零依赖，写不出 `std::time::Instant`。各组合 crate 用
+/// **自己的运行时值**实现它：tokio 给 `tokio::time::Instant`（与它的计时器同一
+/// 时间基准，`test-util` 下可暂停），compio / smol 给 `std::time::Instant`。
+///
+/// 注意**不能**直接为 `std::time::Instant` 实现本 trait（trait 与类型都对外来
+/// crate 而言是外来的，孤儿规则 `E0117`）——所以它天然是「运行时的能力」。
+///
+/// # Examples
+///
+/// ```rust
+/// use core::time::Duration;
+///
+/// use abs_art::TrClock;
+///
+/// fn deadline_in<R>(rt: &R, budget: Duration) -> R::Instant
+/// where
+///     R: TrClock,
+/// {
+///     rt.now() + budget
+/// }
+/// ```
+pub trait TrClock {
+    /// 本运行时值的时刻类型。
+    type Instant: Copy
+        + Ord
+        + Add<Duration, Output = Self::Instant>
+        + Sub<Self::Instant, Output = Duration>
+        + 'static;
+
+    /// 读取当前时刻（与本运行时的计时器同一时间基准）。
+    fn now(&self) -> Self::Instant;
+}
+
 /// 后端的**计时能力**：按周期唤醒，以及带超时地等一个 future。
 ///
-/// 它是 [`TrDelay`](crate::TrDelay) 的**超 trait**：**睡眠不再另起名字**——一次性的
+/// 它是 [`TrDelay`] 与 [`TrClock`] 的**超 trait**：**睡眠不再另起名字**——一次性的
 /// 「睡一段」就是 [`TrDelay::delay`]，本 trait 不重复提供 `sleep`（那会是同一个能力的
-/// 第二个名字）。于是能力分两层：
+/// 第二个名字）。于是能力分三层：
 ///
 /// | 层 | 提供什么 |
 /// | --- | --- |
-/// | [`TrDelay`](crate::TrDelay) | 一次性睡眠 `delay` |
+/// | [`TrDelay`] | 一次性睡眠 `delay` |
+/// | [`TrClock`] | 绝对时刻 `now`（与上面的计时器同源） |
 /// | `TrTime` | 周期源 [`TrTime::interval`] + 组合出的 [`TrTime::timeout`] |
 ///
-/// 两个方法都是**关联函数**（不收 `self`）：后端的计时源来自运行时的线程本地上下文，
-/// 不需要由值携带，因此业务库只需把**类型**穿进来，不必先拿到某个计时器值。
+/// 三个方法都是**值方法**（收 `&self`）：计时源来自这个运行时值，
+/// 因此业务库只需把**值**传进来，不必先拿到某个计时器类型参数。
 ///
 /// # Examples
 ///
@@ -81,15 +145,15 @@ use core::{
 ///
 /// use abs_art::{TrDelay, TrInterval, TrTime};
 ///
-/// /// 业务代码只需泛型于 `D: TrTime`，具体后端由最终二进制选中。
-/// async fn tick_twice<D: TrTime>() {
-///     D::delay(Duration::from_millis(1)).await;
-///     let mut period = D::interval(Duration::from_millis(1));
+/// /// 业务代码只需泛型于 `R: TrTime`，具体后端由最终二进制给出值。
+/// async fn tick_twice<R: TrTime>(rt: &R) {
+///     rt.delay(Duration::from_millis(1)).await;
+///     let mut period = rt.interval(Duration::from_millis(1));
 ///     period.tick().await;
 ///     period.tick().await;
 /// }
 /// ```
-pub trait TrTime: TrDelay {
+pub trait TrTime: TrDelay + TrClock {
     /// 周期源的**具体类型**（由后端给出）。
     ///
     /// 是关联类型而不是 `impl TrInterval`：调用方因此能命名它（存进结构体、
@@ -108,7 +172,7 @@ pub trait TrTime: TrDelay {
     /// # Examples
     ///
     /// 见 [`TrTime`]。
-    fn interval(period: Duration) -> Self::Interval;
+    fn interval(&self, period: Duration) -> Self::Interval;
 
     /// 要求 `future` 在 `duration` 之内完成。
     ///
@@ -135,16 +199,16 @@ pub trait TrTime: TrDelay {
     ///
     /// use abs_art::{Elapsed, TrTime};
     ///
-    /// async fn demo<D: TrTime>() -> Result<u8, Elapsed> {
-    ///     D::timeout(Duration::from_millis(10), async { 7u8 }).await
+    /// async fn demo<R: TrTime>(rt: &R) -> Result<u8, Elapsed> {
+    ///     rt.timeout(Duration::from_millis(10), async { 7u8 }).await
     /// }
     /// ```
-    fn timeout<F>(duration: Duration, future: F) -> Timeout<Self, F>
+    fn timeout<F>(&self, duration: Duration, future: F) -> Timeout<Self, F>
     where
         F: Future,
         Self: Sized,
     {
-        Timeout::new(duration, future)
+        Timeout::new(self, duration, future)
     }
 }
 
@@ -186,8 +250,8 @@ pub trait TrInterval {
 ///
 /// use abs_art::{Elapsed, TrTime};
 ///
-/// async fn demo<D: TrTime>() -> Result<u8, Elapsed> {
-///     D::timeout(Duration::from_millis(10), async { 7u8 }).await
+/// async fn demo<R: TrTime>(rt: &R) -> Result<u8, Elapsed> {
+///     rt.timeout(Duration::from_millis(10), async { 7u8 }).await
 /// }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +302,9 @@ where
     ///
     /// 计时器在**此刻**就起（而不是等到第一次 `poll`），因此期限从调用点算起。
     ///
+    /// 计时源取自传入的**运行时值** `rt`：这样「谁的计时器」不需要再靠类型参数
+    /// 或全局上下文回答。
+    ///
     /// # Examples
     ///
     /// ```
@@ -245,13 +312,13 @@ where
     ///
     /// use abs_art::{Elapsed, TrTime};
     ///
-    /// async fn demo<D: TrTime>() -> Result<u8, Elapsed> {
-    ///     D::timeout(Duration::from_millis(10), async { 7u8 }).await
+    /// async fn demo<R: TrTime>(rt: &R) -> Result<u8, Elapsed> {
+    ///     rt.timeout(Duration::from_millis(10), async { 7u8 }).await
     /// }
     /// ```
-    pub fn new(duration: Duration, future: F) -> Self {
+    pub fn new(rt: &D, duration: Duration, future: F) -> Self {
         Self {
-            delay_: D::delay(duration),
+            delay_: rt.delay(duration),
             future_: future,
             _pin_: PhantomPinned,
         }
@@ -338,17 +405,49 @@ mod tests {
 
     /// 虚拟时间的计时能力：`delay(d)` 把虚拟时钟推进 `d` 后**立刻**就绪。
     ///
-    /// 它证明一件事：本模块的抽象是**可注入**的——消费方能用假时钟做确定性验收，
-    /// 而不必依赖真实运行时的调度。
+    /// 它证明一件事：本模块的抽象是**可注入**的——消费方能用假运行时值做确定性
+    /// 验收，而不必依赖真实运行时的调度。注意注入的是**值**：计时器与时刻来自
+    /// 同一份虚拟时钟，二者不可能错配。
     struct FakeTime_;
+
+    /// 虚拟时刻（毫秒计数）。
+    ///
+    /// 它满足 [`TrClock::Instant`] 的结构约束：`Copy + Ord + Add<Duration>` +
+    /// `Sub<Self, Output = Duration>`。
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct FakeInstant_(u64);
+
+    impl core::ops::Add<Duration> for FakeInstant_ {
+        type Output = FakeInstant_;
+
+        fn add(self, rhs: Duration) -> FakeInstant_ {
+            FakeInstant_(self.0 + rhs.as_millis() as u64)
+        }
+    }
+
+    impl core::ops::Sub<FakeInstant_> for FakeInstant_ {
+        type Output = Duration;
+
+        fn sub(self, rhs: FakeInstant_) -> Duration {
+            Duration::from_millis(self.0.saturating_sub(rhs.0))
+        }
+    }
 
     /// 虚拟时钟（毫秒）。
     static VIRTUAL_MILLIS: AtomicU64 = AtomicU64::new(0);
 
+    impl TrClock for FakeTime_ {
+        type Instant = FakeInstant_;
+
+        fn now(&self) -> Self::Instant {
+            FakeInstant_(VIRTUAL_MILLIS.load(Ordering::SeqCst))
+        }
+    }
+
     impl TrDelay for FakeTime_ {
         type Delay = FakeDelay_;
 
-        fn delay(duration: Duration) -> Self::Delay {
+        fn delay(&self, duration: Duration) -> Self::Delay {
             FakeDelay_ {
                 duration_: duration,
                 done_: false,
@@ -383,7 +482,7 @@ mod tests {
     impl TrTime for FakeTime_ {
         type Interval = FakeInterval_;
 
-        fn interval(period: Duration) -> Self::Interval {
+        fn interval(&self, period: Duration) -> Self::Interval {
             assert!(period > Duration::ZERO, "`period` must be non-zero.");
             FakeInterval_(period)
         }
@@ -409,7 +508,7 @@ mod tests {
     /// 通过依据：结果为 `Ok(7)`。
     #[test]
     fn timeout_returns_output_when_inner_wins() {
-        let out = block_on_(FakeTime_::timeout(
+        let out = block_on_(FAKE_RT.timeout(
             Duration::from_millis(10),
             async { 7u8 },
         ));
@@ -423,7 +522,7 @@ mod tests {
     /// 通过依据：结果为 `Err`，且 `Display` 为「期限已到」。
     #[test]
     fn timeout_elapses_on_a_pending_inner_future() {
-        let out = block_on_(FakeTime_::timeout(
+        let out = block_on_(FAKE_RT.timeout(
             Duration::from_millis(5),
             pending::<u8>(),
         ));
@@ -440,11 +539,11 @@ mod tests {
     #[test]
     fn virtual_clock_only_advances_by_sleep() {
         VIRTUAL_MILLIS.store(0, Ordering::SeqCst);
-        let _ = block_on_(FakeTime_::timeout(
+        let _ = block_on_(FAKE_RT.timeout(
             Duration::from_millis(3),
             pending::<u8>(),
         ));
-        let _ = block_on_(FakeTime_::timeout(
+        let _ = block_on_(FAKE_RT.timeout(
             Duration::from_millis(3),
             pending::<u8>(),
         ));
@@ -459,7 +558,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "must be non-zero")]
     fn interval_rejects_zero_period() {
-        let _ = <FakeTime_ as TrTime>::interval(Duration::ZERO);
+        let _ = FAKE_RT.interval(Duration::ZERO);
     }
 
     /// 目的：验证 `Elapsed` 满足错误类型的三件套（`Debug` / `Display` / `Error`）。
@@ -472,13 +571,16 @@ mod tests {
         fn assert_error_<E: core::error::Error>() {}
         assert_error_::<Elapsed>();
 
-        let elapsed = block_on_(FakeTime_::timeout(
+        let elapsed = block_on_(FAKE_RT.timeout(
             Duration::from_millis(1),
             pending::<u8>(),
         ))
         .expect_err("期限已到应当是错误");
         assert!(core::error::Error::source(&elapsed).is_none());
     }
+
+    /// 测试用的虚拟运行时**值**。
+    const FAKE_RT: FakeTime_ = FakeTime_;
 
     /// 极简的 `block_on`：本 crate 是 `no_std` + 零依赖，测试里不引入运行时，
     /// 因此手动把一个 future 抽干（`FakeTime_` 的所有等待都立刻就绪，不会挂起）。

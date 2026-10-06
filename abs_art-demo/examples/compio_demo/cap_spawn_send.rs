@@ -12,6 +12,13 @@
 //! 3. **任务 panic 的错误传播**：`JoinErr` 通过句柄的关联类型 `H::JoinErr`
 //!    （`core::error::Error`）传给调用方（compio 的 `JoinError::Panicked`）。
 //!
+//! # 值语义（v0.4）
+//!
+//! `spawn` / `block_on` 都是**值方法**：任务投递到**这个值**抓住的那份运行时
+//! 的工作队列上，等待也由这份运行时驱动。compio 的运行时是线程本地的
+//! （`!Send`），因此这里「全局队列」的实际形态是「本线程运行时的队列」——
+//! 值如实说出这条前提，而不是靠「当前线程恰好进入了哪个运行时」碰运气。
+//!
 //! # 可以做到
 //!
 //! - `spawn` 一个 `Send + 'static` 的 future 到当前 compio 运行时的工作队列；
@@ -31,13 +38,13 @@
 //!   但抽象层的 `TrSpawnSend` 契约要求 `Send`，两个后端一致；
 //! - `spawn` **借用非 `'static`** 数据的 future → 编译错误（对照 `cap_block_on`
 //!   里 `block_on` 可以借用，见 `spawn_requires_static`）；
-//! - `spawn_local` → 编译错误：`Runtime` 上**根本没有这个方法**（本地投递自
-//!   v0.3 起不由能力位承载，而是由 `LocalScope` 值承载，见
-//!   `no_spawn_local_on_runtime_type`）。
+//! - 在这里调 `spawn_local` → 编译错误：`CAPS` 里没有 `SPAWN_LOCAL` 位，
+//!   这个值不实现 `TrLocalScope`（本地投递的调用点在运行时值上，见
+//!   `spawn_local_requires_declaration` 与 `cap_spawn_local`）。
 
 use core::future::Future;
 
-use bridge_compio::{BLOCK_ON, SPAWN_SEND, Runtime, TrBlockOn, TrJoinHandle, TrSpawnSend};
+use bridge_compio::{BLOCK_ON, Runtime, SPAWN_SEND, TrBlockOn, TrJoinHandle, TrSpawnSend};
 
 /// 能力声明：`block_on` + `spawn_send`。
 type SendRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;
@@ -54,14 +61,14 @@ where
     handle.await
 }
 
-/// 业务函数：spawn 三个任务并发计算，再聚合结果。
+/// 业务函数：在这个运行时值上 spawn 三个任务并发计算，再聚合结果。
 ///
 /// compio 的任务在同一个线程本地运行时上交错执行；返回值通过抽象的
 /// `join_abstract` 取回，调用点没有任何后端类型泄漏。
-async fn concurrent_sum(x: i32) -> i32 {
-    let h1 = <SendRt as TrSpawnSend>::spawn(async move { x });
-    let h2 = <SendRt as TrSpawnSend>::spawn(async move { x * 2 });
-    let h3 = <SendRt as TrSpawnSend>::spawn(async move { x * 3 });
+async fn concurrent_sum(rt: &SendRt, x: i32) -> i32 {
+    let h1 = rt.spawn(async move { x });
+    let h2 = rt.spawn(async move { x * 2 });
+    let h3 = rt.spawn(async move { x * 3 });
     let a = join_abstract(h1).await.unwrap();
     let b = join_abstract(h2).await.unwrap();
     let c = join_abstract(h3).await.unwrap();
@@ -69,11 +76,11 @@ async fn concurrent_sum(x: i32) -> i32 {
 }
 
 /// 业务函数：任务内部 panic 时，错误通过 `JoinErr` 传播给 await 方。
-async fn panic_propagates() -> bool {
+async fn panic_propagates(rt: &SendRt) -> bool {
     async fn boom() -> i32 {
         panic!("任务爆炸");
     }
-    let h = <SendRt as TrSpawnSend>::spawn(boom());
+    let h = rt.spawn(boom());
     // compio 的 JoinError::Panicked 同样会被捕获为 Err，而不是炸掉进程
     join_abstract(h).await.is_err()
 }
@@ -82,9 +89,10 @@ fn main() {
     let rt = compio::runtime::Runtime::new().unwrap();
 
     let (sum, panicked) = rt.block_on(async {
-        // 外层 compio 上下文内再 block_on 聚合 future（块内执行 spawn 等操作）
-        let sum = <SendRt as TrBlockOn>::block_on(concurrent_sum(7));
-        let panicked = <SendRt as TrBlockOn>::block_on(panic_propagates());
+        // 在运行时上下文内构造值；块内用值上的 block_on 聚合 future
+        let value = SendRt::current();
+        let sum = value.block_on(concurrent_sum(&value, 7));
+        let panicked = value.block_on(panic_propagates(&value));
         (sum, panicked)
     });
 

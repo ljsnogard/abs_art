@@ -1,8 +1,11 @@
-//! `time`：计时能力——周期源（[`TrInterval`]）与超时（[`TrTime`]）。
+//! `time`：计时能力——时刻（[`TrClock`]）、周期源（[`TrInterval`]）与超时（[`TrTime`]）。
 //!
-//! 实现基于 smol 的 `Timer`（即 `async_io::Timer`，由 async-io 的反应器驱动）：
+//! 实现基于 smol 的 `Timer`（即 `async_io::Timer`，由 async-io 的进程级反应器
+//! 驱动）：
 //!
 //! - 一次性睡眠：[`TrDelay::Delay`] = `UnitFuture<smol::Timer>`（在 `delay.rs` 里给出）；
+//! - 时刻：[`TrClock::Instant`] = `std::time::Instant`——**与上面的睡眠同一时间
+//!   基准**，理由见下；
 //! - 周期源：[`Interval`]——**自建**，因为 `async_io::Timer::interval` 的首次 tick
 //!   落在「一个周期之后」，与本 crate 的契约（首次**立即**）不符；
 //! - `tick` 的 future：[`Tick`]。
@@ -11,6 +14,29 @@
 //! [`Timeout`](abs_art::Timeout)。
 //!
 //! 与 `delay` 共用 `delay` feature：两者要的是同一个驱动器（async-io 的反应器）。
+//!
+//! # 为什么 `TrClock::Instant` 取 `std::time::Instant`
+//!
+//! [`TrClock`] 要求 `Instant: Copy + Ord + Add<Duration, Output = Self> +
+//! Sub<Self, Output = Duration> + 'static`。`std::time::Instant` 四条全满足：
+//!
+//! | 约束 | 由谁提供 |
+//! | --- | --- |
+//! | `Copy + Ord` | `std` 的 `#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]` |
+//! | `Add<Duration, Output = Instant>` | `impl Add<Duration> for Instant`（`deadline = now + budget`） |
+//! | `Sub<Instant, Output = Duration>` | `impl Sub<Instant> for Instant`（`elapsed = then − now`，对更早的时刻饱和到零） |
+//! | `'static` | 自有值，不含借用 |
+//!
+//! 更关键的是**同源**：async-io 的计时器内部就是按 `std::time::Instant` 计算的
+//! （`async_io::Timer::after(d)` 即 `Instant::now() + d`；async-io 源码里
+//! `use std::time::{Duration, Instant}`），而 [`TrDelay::Delay`] 正是那个
+//! `smol::Timer` 的包装。于是本后端的 `now()` 与 `delay()` 走的是**同一个**时间
+//! 基准，`TrTime: TrDelay + TrClock` 这条结构性绑定在 smol 上是真的成立的，而不是
+//! 靠约定。要注入假时钟时，替换的应当是**整个运行时值**（同时实现 `TrDelay` 与
+//! `TrClock`），而不是给真反应器配一个外来时刻源。
+//!
+//! 注意**不能**直接为 `std::time::Instant` 实现 [`TrClock`]（trait 与类型都对外来
+//! crate 而言是外来的，孤儿规则 `E0117`）——所以它天然是「运行时的能力」。
 
 use core::{
     future::Future,
@@ -19,7 +45,7 @@ use core::{
     time::Duration,
 };
 
-use abs_art::{HasDelay, TrDelay, TrInterval, TrTime, UnitFuture};
+use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
 
 use crate::Runtime;
 
@@ -66,36 +92,27 @@ impl TrInterval for Interval {
     }
 }
 
+impl<const CAPS: usize> TrClock for Runtime<CAPS>
+where
+    [(); CAPS]: HasDelay,
+{
+    /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：async-io 的计时器
+    /// 内部用的就是 `std::time::Instant`（见模块文档的约束表）。
+    type Instant = std::time::Instant;
+
+    /// 读取当前时刻。
+    fn now(&self) -> Self::Instant {
+        std::time::Instant::now()
+    }
+}
+
 impl<const CAPS: usize> TrTime for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
 {
     type Interval = Interval;
 
-    fn interval(period: Duration) -> Self::Interval {
-        smol_interval_(period)
-    }
-}
-
-/// 让**本地作用域值**也承载一次性睡眠（[`TrDelay`]）与周期源（[`TrTime`]）。
-///
-/// 业务库手上只有作用域值（`S: TrLocalScope`），补上这两格之后写 `S: TrTime`
-/// 一个约束就够，不必再引入第二个类型参数。smol 的计时源来自全局反应器，
-/// 因此本实现**只借类型**、不读任何字段。
-#[cfg(feature = "local_scope")]
-impl TrDelay for crate::LocalScope {
-    type Delay = UnitFuture<smol::Timer>;
-
-    fn delay(duration: Duration) -> Self::Delay {
-        UnitFuture::new(smol::Timer::after(duration))
-    }
-}
-
-#[cfg(feature = "local_scope")]
-impl TrTime for crate::LocalScope {
-    type Interval = Interval;
-
-    fn interval(period: Duration) -> Self::Interval {
+    fn interval(&self, period: Duration) -> Self::Interval {
         smol_interval_(period)
     }
 }
@@ -116,25 +133,29 @@ fn smol_interval_(period: Duration) -> Interval {
 
 #[cfg(test)]
 mod tests {
-    //! smol 后端的 `TrTime` 单测。
+    //! smol 后端的 `TrDelay` / `TrClock` / `TrTime` 单测。
     //!
     //! 跨三后端的一致性契约由 `abs_art-smoke` 的 `time_contract` 用例负责；这里只
     //! 钉住「本后端能不能跑起来」这几条。
 
-    use std::time::Instant;
+    use core::ops::{Add, Sub};
+
+    use abs_art::{DELAY, FULL, TrDelay};
 
     use super::*;
 
     /// 目的：验证 `delay` 能真正睡到（async-io 的反应器被驱动）。
     ///
-    /// 实施策略：`smol::block_on` 里 await 1 ms 的 `delay`，量测实际耗时。
+    /// 手段：构造 `Runtime<{ FULL }>` 值，在 `smol::block_on` 里 await 1ms 的
+    /// `delay`，量测实际耗时。
     ///
-    /// 通过依据：正常返回且耗时 `>= 1 ms`。
+    /// 判定：正常返回且耗时 `>= 1ms`；若反应器没被驱动，本用例会挂死。
     #[test]
     fn delay_completes_and_waits_at_least_the_duration() {
+        let rt = Runtime::<{ FULL }>::current();
         smol::block_on(async {
-            let started = Instant::now();
-            <Runtime<{ crate::FULL }> as TrDelay>::delay(Duration::from_millis(1)).await;
+            let started = std::time::Instant::now();
+            rt.delay(Duration::from_millis(1)).await;
             assert!(
                 started.elapsed() >= Duration::from_millis(1),
                 "delay 不该提前返回"
@@ -144,16 +165,16 @@ mod tests {
 
     /// 目的：验证周期源的**第一次** tick 立即完成（契约第 2 条）。
     ///
-    /// 实施策略：取一个 5 秒的周期，量测第一次 tick 的耗时。
+    /// 手段：构造运行时值，取一个 5 秒的周期，量测第一次 tick 的耗时。
     ///
-    /// 通过依据：耗时远小于周期（这里取 `< 1 秒`）。若照搬
-    /// `async_io::Timer::interval` 的首次语义，本用例会等到 5 秒后才返回。
+    /// 判定：耗时远小于周期（这里取 `< 1 秒`）。若照搬 `async_io::Timer::interval`
+    /// 的首次语义，本用例会等到 5 秒后才返回。
     #[test]
     fn interval_first_tick_is_immediate() {
+        let rt = Runtime::<{ FULL }>::current();
         smol::block_on(async {
-            let mut period =
-                <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::from_secs(5));
-            let started = Instant::now();
+            let mut period = rt.interval(Duration::from_secs(5));
+            let started = std::time::Instant::now();
             period.tick().await;
             assert!(
                 started.elapsed() < Duration::from_secs(1),
@@ -164,20 +185,20 @@ mod tests {
 
     /// 目的：验证自建周期源「锚定」而非「每响之后再等一个周期」。
     ///
-    /// 实施策略：周期取 100 ms；第一次 tick 立即，此后先故意耗掉 150 ms 再第二次
-    /// tick，量测第二次 tick 的耗时。
+    /// 手段：周期取 100ms；第一次 tick 立即，此后先故意耗掉 150ms 再第二次 tick，
+    /// 量测第二次 tick 的耗时。
     ///
-    /// 通过依据：如果实现是「上一觉之后再等 period」，第二次 tick 要再等 100 ms
-    /// （总 250 ms）；锚定实现则在构造后 100 ms 处就该到点，因此耗时应当**远小于
-    /// 100 ms**（这里取 `< 50 ms`）。
+    /// 判定：如果实现是「上一觉之后再等 period」，第二次 tick 要再等 100ms
+    /// （总 250ms）；锚定实现则在构造后 100ms 处就该到点，因此耗时应当**远小于
+    /// 100ms**（这里取 `< 50ms`）。
     #[test]
     fn interval_is_anchored_to_its_creation_instant() {
+        let rt = Runtime::<{ FULL }>::current();
         smol::block_on(async {
-            let mut period =
-                <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::from_millis(100));
+            let mut period = rt.interval(Duration::from_millis(100));
             period.tick().await; // 立即
             smol::Timer::after(Duration::from_millis(150)).await;
-            let started = Instant::now();
+            let started = std::time::Instant::now();
             period.tick().await;
             assert!(
                 started.elapsed() < Duration::from_millis(50),
@@ -188,25 +209,83 @@ mod tests {
 
     /// 目的：验证「睡眠 future 是 `Send`」在**编译期可见**。
     ///
-    /// 实施策略：编译期断言 `<Runtime<{FULL}> as TrDelay>::Delay: Send`。
+    /// 手段：编译期断言 `<Runtime<{FULL}> as TrDelay>::Delay: Send`。
     ///
-    /// 通过依据：编译通过即为通过——把返回类型从 `impl Future`（RPITIT）换成
+    /// 判定：编译通过即为通过——把返回类型从 `impl Future`（RPITIT）换成
     /// **关联类型**之后，自动 trait 能出现在调用方的约束里。
     #[test]
     fn delay_future_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<<Runtime<{ crate::FULL }> as TrDelay>::Delay>();
+        assert_send::<<Runtime<{ FULL }> as TrDelay>::Delay>();
     }
 
     /// 目的：验证零周期在构造点被拒绝（契约第 5 条）。
     ///
-    /// 实施策略：`#[should_panic]` 捕获 `interval(Duration::ZERO)`——async-io 自身
+    /// 手段：`#[should_panic]` 捕获值的 `interval(Duration::ZERO)`——async-io 自身
     /// **不**断言（会退化成忙循环），因此本后端必须自己挡。
     ///
-    /// 通过依据：panic 文案含 "non-zero"。
+    /// 判定：panic 文案含 "non-zero"。
     #[test]
     #[should_panic(expected = "non-zero")]
     fn interval_rejects_zero_period() {
-        let _ = <Runtime<{ crate::FULL }> as TrTime>::interval(Duration::ZERO);
+        let rt = Runtime::<{ FULL }>::current();
+        let _ = rt.interval(Duration::ZERO);
+    }
+
+    /// 目的：验证 `TrClock::Instant` 满足 trait 文档里的**结构约束**（编译期，
+    /// 非空约束）。
+    ///
+    /// 手段：把 `<Runtime<{FULL}> as TrClock>::Instant` 传给一个形参带全部四条
+    /// 约束的编译期断言函数。
+    ///
+    /// 判定：编译通过即为通过；若后端换成一个不满足约束的时刻类型，本测试无法编译。
+    #[test]
+    fn clock_instant_satisfies_the_structural_constraints() {
+        fn assert_instant_<T>()
+        where
+            T: Copy + Ord + Add<Duration, Output = T> + Sub<T, Output = Duration> + 'static,
+        {
+        }
+        assert_instant_::<<Runtime<{ FULL }> as TrClock>::Instant>();
+    }
+
+    /// 目的：验证 `now()` 与 `delay` **同源**——期限算术（`now() + Duration`）与
+    /// 实耗（`now() − now()`）在同一条时间线上闭合。
+    ///
+    /// 手段：读一次 `now()` 记为起点，`delay(5ms)` 之后把「实耗」经
+    /// `Sub<Self, Output = Duration>` 取出，再用 `Add<Duration>` 造一个未来期限
+    /// 并与当前的 `now()` 比较。
+    ///
+    /// 判定：实耗 `>= 5ms`（睡眠真的按同一时钟计时），且 `now() + 10ms > now()`
+    /// （加法给出的确实是未来）。若 `Instant` 与计时器不同源（例如一个是墙上时钟、
+    /// 一个是别的基准），实耗会明显偏小或为负而判失败。
+    #[test]
+    fn clock_now_shares_the_time_base_with_delay() {
+        let rt = Runtime::<{ FULL }>::current();
+        let started = rt.now();
+        smol::block_on(rt.delay(Duration::from_millis(5)));
+        let elapsed: Duration = rt.now() - started;
+
+        assert!(
+            elapsed >= Duration::from_millis(5),
+            "实耗 {elapsed:?} 小于睡眠时长：now() 与 delay 不同源"
+        );
+        let deadline = rt.now() + Duration::from_millis(10);
+        assert!(deadline > rt.now(), "now() + Duration 必须是未来时刻");
+    }
+
+    /// 目的：验证 `TrClock` 与 `TrTime` 的能力位门控确实挂在 `DELAY` 上
+    /// （「声明了 `DELAY` 才有时钟与周期源」）。
+    ///
+    /// 手段：编译期断言只声明 `DELAY` 一位的 `Runtime<{ DELAY }>` 同时实现了
+    /// `TrClock` 与 `TrTime`。
+    ///
+    /// 判定：编译通过即为通过；若把门控错标在别的位上，本测试无法编译。
+    #[test]
+    fn declared_delay_cap_gives_clock_and_interval() {
+        fn assert_clock_<T: TrClock>() {}
+        fn assert_time_<T: TrTime>() {}
+        assert_clock_::<Runtime<{ DELAY }>>();
+        assert_time_::<Runtime<{ DELAY }>>();
     }
 }

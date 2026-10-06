@@ -2,28 +2,45 @@
 //!
 //! 提供五个功能（各自为 feature 开关）：
 //!
-//! - `block_on`：阻塞等待一个 future 完成；
-//! - `delay`：睡眠 / 延迟执行，以及计时能力（[`TrTime`]：睡眠 + 周期源）；
+//! - `block_on`：阻塞等待一个 future 完成（同时驱动本值的本地队列）；
+//! - `delay`：睡眠 / 延迟执行，以及计时能力（[`TrClock`] / [`TrTime`]）；
 //! - `spawn_send`：投递任务到全局工作队列；
-//! - `local_scope`：值化的本地作用域（`!Send` 任务 + 统一驱动入口）；
+//! - `local_scope`：值的本地队列（`!Send` 任务 + 统一驱动入口）；
 //! - `spawn_blocking`：投递阻塞函数到阻塞线程池。
 //!
 //! 所有实现都基于基础 crate [`abs_art`] 中的 trait。
+//!
+//! # 运行时是**值**
+//!
+//! [`Runtime`] 是一个真正的运行时值：它抓住调用点的 tokio `Handle`，并按需
+//! 持有一条本地队列（`Rc<LocalSet>`）。因此
+//!
+//! - `spawn` / `spawn_blocking` 打在**这个值**持有的运行时上（不是「当前线程恰好
+//!   在哪个运行时里」）；
+//! - `spawn_local` / `run_until` 打在**这个值**持有的那条本地队列上。
+//!
+//! 同一个进程里存在两套运行时（例如测试二进制里 tokio 与 compio 并存）时，
+//! 「哪条队列、哪个运行时」由你手上的值回答，不需要靠约定。
+//!
+//! 代价：值必须被**构造**出来（不像 v0.3 的 ZST 那样随处可写），且当它持有本地
+//! 队列时是 `!Send`——本地队列本来就绑定线程。
 //!
 //! # 两种用法
 //!
 //! ## 具体用法（二进制层）
 //!
-//! 直接调用全功能 [`Runtime`] 的关联方法：
-//!
 //! ```
+//! use abs_art::TrBlockOn;
 //! use abs_art_tokio::Runtime;
 //!
 //! let rt = tokio::runtime::Runtime::new().unwrap();
-//! rt.block_on(async { Runtime::block_on(async { 42 }) });
+//! rt.block_on(async {
+//!     let tokio_rt = abs_art_tokio::current();
+//!     tokio_rt.block_on(async { 42 })
+//! });
 //! ```
 //!
-//! ## Tag 用法（业务库层，编译期能力检查）
+//! ## 能力位用法（业务库层，编译期能力检查）
 //!
 //! 通过 const 泛型声明所需能力；请求了未声明（或本后端不支持）的能力会在
 //! 编译期报错：
@@ -33,10 +50,12 @@
 //! use abs_art_tokio::Runtime;
 //!
 //! // 只声明 block_on + spawn_send 两种能力
-//! let rt = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
-//! let _ = rt;
-//! // <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrBlockOn>::block_on(async { 1 });
-//! // <Runtime<{ BLOCK_ON | SPAWN_SEND }> as TrSpawnSend>::spawn(async { 2 });
+//! let tokio_rt = tokio::runtime::Runtime::new().unwrap();
+//! tokio_rt.block_on(async {
+//!     let rt = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();
+//!     let _ = rt.spawn(async { 2 });
+//!     rt.block_on(async { 1 })
+//! });
 //! ```
 //!
 //! ```compile_fail
@@ -44,23 +63,31 @@
 //! use abs_art_tokio::Runtime;
 //!
 //! // 只声明了 block_on 能力，spawn（spawn_send）不可用 → 编译错误（Tag 严格模式）
-//! let _ = <Runtime<{ BLOCK_ON }> as TrSpawnSend>::spawn(async { 1 });
+//! let rt = tokio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async {
+//!     let rt = Runtime::<{ BLOCK_ON }>::current();
+//!     let _ = rt.spawn(async { 1 });
+//! });
 //! ```
 //!
-//! ## 本地作用域（值，不是能力位）
+//! ## 本地投递（`!Send` 任务）
 //!
-//! 本地投递（`!Send` 任务）自 v0.3 起由**值**承载——见 [`LocalScope`]：
+//! 本地队列归运行时**值**所有，投递与驱动都在同一个值上：
 //!
 //! ```
 //! use abs_art::TrLocalScope;
-//! use abs_art_tokio::LocalScope;
+//! use abs_art_tokio::Runtime;
 //!
 //! let rt = tokio::runtime::Runtime::new().unwrap();
-//! let scope = LocalScope::new();
-//! let out = rt.block_on(scope.run_until(async {
-//!     let rc = std::rc::Rc::new(6u32); // !Send：只有本地队列能承载
-//!     scope.spawn_local(async move { *rc * 7 }).await.unwrap()
-//! }));
+//! let out = rt.block_on(async {
+//!     let tokio_rt = abs_art_tokio::current();
+//!     tokio_rt
+//!         .run_until(async {
+//!             let rc = std::rc::Rc::new(6u32); // !Send：只有本地队列能承载
+//!             tokio_rt.spawn_local(async move { *rc * 7 }).await.unwrap()
+//!         })
+//!         .await
+//! });
 //! assert_eq!(out, 42);
 //! ```
 
@@ -71,37 +98,158 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "local_scope")]
+use alloc::rc::Rc;
+use core::fmt;
+
+use abs_art::RuntimeTag;
+
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
-    RuntimeTag, Timeout, TrAsyncRuntime, TrBlockOn, TrDelay, TrInterval,
-    TrJoinHandle, TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
+    BLOCK_ON, DELAY, Elapsed, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
+    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
+    TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
 };
 
-/// tokio 组合运行时标记类型。
+/// tokio 组合运行时**值**。
 ///
-/// 对应基础 crate 中的 [`RuntimeTag::Tokio`]。由于孤儿规则（trait 与类型都
-/// 来自 `abs_art` 时无法在外部 crate 中为它实现 trait），每个组合 crate 都
-/// 定义自己的本地 `Runtime` 类型，并为它实现 `abs_art` 中的全部 trait。
+/// 对应基础 crate 中的 [`RuntimeTag::Tokio`]。它抓住构造点的 tokio 句柄，并在
+/// `local_scope` feature 开启时持有一条自己的本地队列（`Rc<LocalSet>`）。
 ///
 /// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认 [`FULL`]（全功能），
-/// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_SEND }>` 只声明部分能力。
-/// **本地投递不在能力位里**，它由 [`LocalScope`] 这个值承载。
-pub struct Runtime<const CAPS: usize = FULL>;
+/// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_SEND }>` 只声明部分能力。掩码决定这个
+/// **类型**实现了哪些能力 trait，从而决定哪些方法可调。
+///
+/// # 构造
+///
+/// 见 [`Runtime::current`]（要求已处于 tokio 运行时上下文）与
+/// [`Runtime::with_handle`]（在任意位置用已有句柄构造，便于把值搬进运行时）。
+///
+/// # 克隆
+///
+/// `Clone` 共享**同一条**本地队列与同一个运行时句柄——克隆出来的值与原来的值
+/// 是同一个运行时的两个把手，不是两份运行时。
+pub struct Runtime<const CAPS: usize = FULL> {
+    /// 构造点抓住的 tokio 句柄：`spawn` / `block_on` 都打在它上面。
+    handle_: tokio::runtime::Handle,
+    /// 本值自己的本地队列（本地投递与 `run_until` 的载体）。
+    #[cfg(feature = "local_scope")]
+    local_: Rc<tokio::task::LocalSet>,
+}
 
-impl Runtime<FULL> {
-    /// 返回本 crate 对应的抽象运行时标签。
-    pub const fn tag() -> RuntimeTag {
-        RuntimeTag::Tokio
-    }
+/// 用当前 tokio 运行时上下文构造**全能力**（`Runtime<FULL>`）运行时值。
+///
+/// 这是最常用的构造入口：类型参数 `CAPS` 直接取默认值 [`FULL`]，因此在表达式
+/// 位置也**不需要类型标注**。需要显式声明能力时用
+/// [`Runtime::current`](Runtime::current) 的 turbofish 形式。
+///
+/// # Panics
+///
+/// 调用点不在 tokio 运行时上下文内时 panic（`Handle::current()` 的行为）。
+///
+/// # Examples
+///
+/// ```
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// let value = rt.block_on(async { abs_art_tokio::current() });
+/// assert_eq!(value.tag(), abs_art::RuntimeTag::Tokio);
+/// ```
+pub fn current() -> Runtime {
+    Runtime::current()
 }
 
 impl<const CAPS: usize> Runtime<CAPS> {
-    /// 返回当前运行时（零大小标记值）。
+    /// 用当前 tokio 运行时上下文构造运行时值。
     ///
-    /// 当 `CAPS` 未显式指定时（`Runtime::current()`），需要类型标注或通过
-    /// 类型别名使用，例如 `let rt: Runtime = Runtime::current();`。
-    pub const fn current() -> Self {
-        Self
+    /// # Panics
+    ///
+    /// 调用点不在 tokio 运行时上下文内时 panic（`Handle::current()` 的行为）。
+    /// 需要在上下文之外构造时，用 [`Runtime::with_handle`]。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art_tokio::Runtime;
+    ///
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// let value = rt.block_on(async { abs_art_tokio::current() });
+    /// assert_eq!(value.tag(), abs_art::RuntimeTag::Tokio);
+    /// ```
+    pub fn current() -> Self {
+        Self::with_handle(tokio::runtime::Handle::current())
+    }
+
+    /// 用给定的 tokio 句柄构造运行时值。
+    ///
+    /// 这是**在运行时上下文之外**构造的标准方式：先在别处取到 `Handle`，
+    /// 再把值搬进运行时（或搬给别的线程——见类型文档的 `Send` 说明）。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art::TrBlockOn;
+    /// use abs_art_tokio::Runtime;
+    ///
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// let handle = rt.handle().clone();
+    /// let value = Runtime::<{ abs_art::FULL }>::with_handle(handle);
+    /// let out = rt.block_on(async { value.block_on(async { 7u8 }) });
+    /// assert_eq!(out, 7);
+    /// ```
+    pub fn with_handle(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            handle_: handle,
+            #[cfg(feature = "local_scope")]
+            local_: Rc::new(tokio::task::LocalSet::new()),
+        }
+    }
+
+    /// 复制一份把手：与本值共享同一个运行时句柄与同一条本地队列。
+    ///
+    /// 与 `Clone` 等价，但可以在 CAPS 上「换标签」（见 [`Runtime::retag`]）。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art::TrBlockOn;
+    /// use abs_art_tokio::Runtime;
+    ///
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// rt.block_on(async {
+    ///     let a = Runtime::<{ abs_art::FULL }>::current();
+    ///     let b = a.retag::<{ abs_art::FULL }>();
+    ///     assert_eq!(b.block_on(async { 1 }), 1);
+    /// });
+    /// ```
+    pub fn retag<const OTHER: usize>(&self) -> Runtime<OTHER> {
+        Runtime {
+            handle_: self.handle_.clone(),
+            #[cfg(feature = "local_scope")]
+            local_: Rc::clone(&self.local_),
+        }
+    }
+
+    /// 本值对应的抽象运行时标签。
+    pub fn tag(&self) -> RuntimeTag {
+        RuntimeTag::Tokio
+    }
+
+    /// 本值抓住的 tokio 句柄（escape hatch，便于做后端特有的事）。
+    pub fn handle(&self) -> &tokio::runtime::Handle {
+        &self.handle_
+    }
+}
+
+impl<const CAPS: usize> Clone for Runtime<CAPS> {
+    fn clone(&self) -> Self {
+        self.retag()
+    }
+}
+
+impl<const CAPS: usize> fmt::Debug for Runtime<CAPS> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("abs_art_tokio::Runtime")
+            .field("caps", &CAPS)
+            .finish_non_exhaustive()
     }
 }
 
@@ -124,10 +272,7 @@ pub mod time;
 mod spawn_send;
 
 #[cfg(feature = "local_scope")]
-pub mod local_scope;
-
-#[cfg(feature = "local_scope")]
-pub use local_scope::LocalScope;
+mod local_scope;
 
 #[cfg(feature = "spawn_blocking")]
 mod spawn_blocking;

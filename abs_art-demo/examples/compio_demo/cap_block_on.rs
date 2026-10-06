@@ -12,6 +12,13 @@
 //!    约束）同样支持这种用法——本文件的业务函数与 tokio 组**逐字相同**，
 //!    证明放松带来的收益与后端无关。
 //!
+//! # 值语义（v0.4）
+//!
+//! `block_on` 是**值方法**：它用**这个值**抓住的那份 compio 运行时来驱动 future
+//! （compio 的 `Runtime::block_on` 会自己 `enter` 出上下文），因此调用点不必
+//! 「恰好处于某个 compio 上下文内」。业务函数接收 `&BlockOnRt`，值由 `main`
+//! 在运行时上下文内用 `BlockOnRt::current()` 构造。
+//!
 //! # 可以做到
 //!
 //! - `block_on` 一个捕获局部变量借用的 future（非 `'static` future）；
@@ -21,12 +28,14 @@
 //! # 不能做到
 //!
 //! - `spawn` / `delay` 等未声明能力 → **编译错误**；`spawn_local` 同样不可用，
-//!   但原因是它根本不由能力位承载（本地投递要持有 `LocalScope` 值）
+//!   原因有两层：`CAPS` 里没有 `SPAWN_LOCAL` 位（值因此不实现 `TrLocalScope`），
+//!   且本示例持有的值并没有被用来驱动本地队列
 //!   （负向演示见 [`abs_art_demo::strict_mode_check`](https://docs.rs/abs_art-demo) 的
 //!   `compile_fail` 文档测试）；
-//! - 在没有任何 compio 运行时上下文的线程里调用（compio 实现依赖
-//!   `Runtime::with_current`，无上下文会 panic）——「必须处于运行时上下文内」
-//!   是后端契约，由集成方（本文件的 `main`）保证；
+//! - 在没有任何 compio 运行时上下文的线程里**构造值**（`current()` 依赖
+//!   `Runtime::current()`，无上下文会 panic）——「构造需要上下文」是后端契约，
+//!   由集成方（本文件的 `main`）保证；要脱离上下文构造，须改用
+//!   `Runtime::with_runtime(rt.clone())`；
 //! - `spawn` 借用非 `'static` 数据：`TrSpawnSend` **没有**放松 `'static`
 //!   约束（任务要脱离当前栈帧运行，借用必然不成立）——同一份"借用代码"，
 //!   `block_on` 能过、`spawn` 不能过，这正是「可以做到什么」与「不能做到什么」
@@ -36,8 +45,8 @@ use bridge_compio::{BLOCK_ON, Runtime, TrBlockOn};
 
 /// 能力声明：只请求 `block_on` 一种能力。
 ///
-/// `Runtime<CAPS>` 是零大小类型（ZST），`CAPS` 只是编译期常量——没有任何
-/// 运行期开销，也没有任何泛型参数穿透到调用点。
+/// `CAPS` 只是编译期常量——掩码决定这个值实现了哪些能力 trait，从而决定哪些
+/// 方法可调；值本身不向调用点穿透任何泛型参数。
 type BlockOnRt = Runtime<{ BLOCK_ON }>;
 
 /// 业务函数 A：`block_on` 一个**借用栈上数据**的 future。
@@ -45,10 +54,10 @@ type BlockOnRt = Runtime<{ BLOCK_ON }>;
 /// `data` 是局部变量，`async` 块捕获的是对它的借用，future 类型不是 `'static`。
 /// 旧约束（`F: Future + 'static`）下这段代码编译不过；放松为 `F: Future`
 /// 后即可编译。compio 的 `block_on` 底层同样没有 `'static` 要求。
-fn sum_stack_data() -> usize {
+fn sum_stack_data(rt: &BlockOnRt) -> usize {
     let data = [1usize, 2, 3, 4];
     // 借用 data 的 future：非 'static，直接在 block_on 里消费掉
-    <BlockOnRt as TrBlockOn>::block_on(async { data.iter().sum() })
+    rt.block_on(async { data.iter().sum() })
 }
 
 /// 业务函数 B：`block_on` 的 future **返回一个借用引用**（Output 非 `'static`）。
@@ -56,17 +65,17 @@ fn sum_stack_data() -> usize {
 /// 旧约束还要求 `<F as Future>::Output: 'static`，而这里 Output 是 `&[i32]`
 /// （借用 `data`），必然不满足 `'static`——放松后可以，只要 `data` 在
 /// `block_on` 返回之后仍然存活（本函数里确实如此）。
-fn slice_then_sum() -> i32 {
+fn slice_then_sum(rt: &BlockOnRt) -> i32 {
     let data = [1i32, 2, 3];
     // Output = &[i32]，生命周期与 data 绑定；block_on 返回后 data 仍存活
-    let slice = <BlockOnRt as TrBlockOn>::block_on(async { data.as_slice() });
+    let slice = rt.block_on(async { data.as_slice() });
     slice.iter().sum::<i32>()
 }
 
 /// 业务函数 C：`block_on` 一个借用局部 `String` 的 future（方法调用即借用）。
-fn str_len() -> usize {
+fn str_len(rt: &BlockOnRt) -> usize {
     let s = String::from("hello");
-    <BlockOnRt as TrBlockOn>::block_on(async { s.len() })
+    rt.block_on(async { s.len() })
 }
 
 fn main() {
@@ -75,11 +84,13 @@ fn main() {
     // 与 tokio 组不同，这里没有「必须多线程 / block_in_place」的限制。
     let rt = compio::runtime::Runtime::new().unwrap();
 
-    // 外层 rt.block_on 提供「运行时上下文」，内层才是抽象层的 TrBlockOn 调用
+    // 外层 rt.block_on 提供「运行时上下文」，并在此构造抽象层的运行时**值**；
+    // 内层才是值上的 TrBlockOn 调用。
     let (a, b, c) = rt.block_on(async {
-        let a = sum_stack_data();
-        let b = slice_then_sum();
-        let c = str_len();
+        let value = BlockOnRt::current();
+        let a = sum_stack_data(&value);
+        let b = slice_then_sum(&value);
+        let c = str_len(&value);
         (a, b, c)
     });
 

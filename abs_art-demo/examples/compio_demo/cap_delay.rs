@@ -10,6 +10,15 @@
 //!    `Timer`；
 //! 3. 连续多次 `delay` 可以串联成周期性节奏（tick）。
 //!
+//! # 值语义（v0.4）
+//!
+//! `delay` 是**值方法**：业务函数接收 `&DelayRt` 并调用 `rt.delay(..)`，于是
+//! 「用哪个运行时」由手上的值回答。注意 compio 的计时注册本身是**环境式**的
+//! （`time::sleep` 靠线程本地上下文找运行时，且注册发生在首次轮询），因此
+//! `delay` 的注册点落在**轮询所在线程的当前 compio 运行时**上；在本示例里，
+//! 外层 `rt.block_on` 与值指向的是同一份运行时，两者一致。这条后端差异见
+//! `abs_art-compio` 的 crate 文档。
+//!
 //! # 可以做到
 //!
 //! - `delay(duration)` 产生一个 future，`await` 它至少等待 `duration`；
@@ -34,19 +43,19 @@ use bridge_compio::{DELAY, Runtime, TrDelay};
 /// 能力声明：只请求 `delay` 一种能力（最小权限）。
 type DelayRt = Runtime<{ DELAY }>;
 
-/// 业务函数 A：睡眠至少 `ms` 毫秒，返回实际经过的毫秒数。
-async fn wait_at_least(ms: u64) -> u128 {
+/// 业务函数 A：在这个运行时值上睡眠至少 `ms` 毫秒，返回实际经过的毫秒数。
+async fn wait_at_least(rt: &DelayRt, ms: u64) -> u128 {
     let start = Instant::now();
     // TrDelay::delay 返回一个等待 duration 之后完成的 future
-    <DelayRt as TrDelay>::delay(Duration::from_millis(ms)).await;
+    rt.delay(Duration::from_millis(ms)).await;
     start.elapsed().as_millis()
 }
 
 /// 业务函数 B：连续三次短睡眠，构造 3 个 tick 的节拍。
-async fn tick_tock() -> usize {
+async fn tick_tock(rt: &DelayRt) -> usize {
     let mut ticks = 0;
     for _ in 0..3 {
-        <DelayRt as TrDelay>::delay(Duration::from_millis(1)).await;
+        rt.delay(Duration::from_millis(1)).await;
         ticks += 1;
     }
     ticks
@@ -57,8 +66,10 @@ fn main() {
     let rt = compio::runtime::Runtime::new().unwrap();
 
     let (elapsed, ticks) = rt.block_on(async {
-        let elapsed = wait_at_least(10).await;
-        let ticks = tick_tock().await;
+        // 在运行时上下文内构造值：类型别名已固定 CAPS，无需 turbofish
+        let value = DelayRt::current();
+        let elapsed = wait_at_least(&value, 10).await;
+        let ticks = tick_tock(&value).await;
         (elapsed, ticks)
     });
 
