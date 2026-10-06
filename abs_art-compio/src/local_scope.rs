@@ -385,6 +385,8 @@ impl LocalScope {
     {
         let rt = self.rt_.clone();
         let ticker = self.rt_.clone();
+        // 「有活」= 上一轮之后有任务被唤醒（唤醒登记）**或** 队列里还有就绪任务。
+        // 只取后者会漏掉「跑完最后一个任务、它唤醒的下一环才入队」这一瞬间。
         rt.block_on(abs_art_mock_clock::Supervisor::new(
             body,
             clock.clone(),
@@ -399,7 +401,7 @@ mod mock_clock_tests_ {
 
     use std::time::Duration;
 
-    use abs_art::{TrClock, TrDelay, TrLocalScope};
+    use abs_art::{TrClock, TrDelay, TrJoinHandle, TrLocalScope};
     use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
 
     /// 目的：验证「虚拟一小时」在真实时间里几乎瞬间完成。
@@ -466,5 +468,76 @@ mod mock_clock_tests_ {
         assert_eq!(out, 42);
         assert_eq!(clock.now().as_millis(), 1_800_000);
         assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+    }
+
+    /// 让出一次执行权：自唤醒一次后返回 `Pending`。
+    ///
+    /// `wake_by_ref` 不可省——用于本文件里的「永远有活」任务时，它正是「每轮都重新
+    /// 就绪」的来源；缺了它任务会真的 park 下去，执行器随即变成「没活」。
+    async fn yield_once_() {
+        let mut first = true;
+        core::future::poll_fn(move |cx| {
+            if first {
+                first = false;
+                cx.waker().wake_by_ref();
+                core::task::Poll::Pending
+            } else {
+                core::task::Poll::Ready(())
+            }
+        })
+        .await;
+    }
+
+    /// 目标契约：**执行器还有活时不得消耗虚拟时间**。
+    ///
+    /// - 手段：放一个「每轮自唤醒」的本地任务（执行器因此始终有就绪工作），再让主体
+    ///   作 6 轮让出。
+    /// - 判断：这 6 轮之间的虚拟时刻推进量必须是 0。跨三端的最小复现与病因见
+    ///   `smux_v1/dev-notes/timer-mock-clock-and-generic-drop-20261006-1625.md` §11。
+    #[test]
+    fn busy_executor_does_not_advance_virtual_time() {
+        let rt = compio::runtime::Runtime::new().expect("建 compio 运行时");
+        let (scope, value) = rt.block_on(async {
+            let value = crate::current();
+            let scope = value.local_scope();
+            (scope, value)
+        });
+        let clock = ManualClock::new();
+        let timed = ManualTime::new(value, clock.clone());
+        let scope_spawn = scope.clone();
+        let task_timed = timed.clone();
+        let (start, end) = scope.block_on_advancing(&clock, async move {
+            // 周期定时器：保证时钟「有下一个到期时刻」可推。
+            scope_spawn
+                .spawn_local(async move {
+                    loop {
+                        task_timed.delay(Duration::from_millis(500u64)).await;
+                    }
+                })
+                .detach();
+            // 【契约】再放一个「永远有活」的任务（每轮自唤醒）：执行器始终有
+            // 就绪工作，因此**不得**推进虚拟时钟。
+            scope_spawn
+                .spawn_local(async move {
+                    loop {
+                        yield_once_().await;
+                    }
+                })
+                .detach();
+            for _ in 0..2 {
+                yield_once_().await;
+            }
+            let start = timed.now();
+            for _ in 0..6 {
+                yield_once_().await;
+            }
+            let end = timed.now();
+            (start, end)
+        });
+        assert_eq!(
+            (end - start).as_millis(),
+            0u128,
+            "执行器有活时不该消耗虚拟时间"
+        );
     }
 }

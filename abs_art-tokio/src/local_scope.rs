@@ -123,11 +123,16 @@ impl TrLocalScope for LocalScope {
     /// 队列随**线程**存活，不随任务句柄存活——因此
     /// [`TrJoinHandle::detach`](abs_art::TrJoinHandle::detach) 之后任务仍会被持续
     /// 驱动，直到它自己结束（或线程退出）。
+    ///
+    /// `mock-clock` 下任务会被 [`mock_wake_::Tracked_`] 包一层，以便把「执行器还有活」
+    /// 折算给 `block_on_advancing` 的 tick 钩子（见 [`WOKE_`]）。
     fn spawn_local<F>(&self, future: F) -> Self::Handle<F::Output>
     where
         F: Future + 'static,
         <F as Future>::Output: 'static,
     {
+        #[cfg(feature = "mock-clock")]
+        let future = mock_wake_::Tracked_::new_(future, WOKE_.with(std::sync::Arc::clone));
         self.local_.spawn_local(future).into()
     }
 
@@ -366,6 +371,23 @@ mod tests {
     }
 }
 
+// 【`mock-clock`】「执行器还有活吗」的信号源。
+//
+// tokio 的 `LocalSet::tick` 是 crate 私有的，外部拿不到「本轮跑没跑到任务」。本后端
+// 因此改用**唤醒登记**折算同一个意思：`mock-clock` 下经
+// [`spawn_local`](abs_art::TrLocalScope::spawn_local) 投递的任务都被
+// `mock_wake_::Tracked_` 包一层，任务注册出去的 waker 被调用（= 有任务被唤醒、
+// 执行器还有活）时置位这个标志；`block_on_advancing` 的 tick 钩子读取并清除它。
+//
+// 判据的语义是「自上一轮 tick 以来，本地任务有没有被唤醒过」——比「跑到过任务」
+// 更保守（刚被唤醒、还没被 poll 的任务也算有活），这正是「有活就别推进时间」需要的。
+#[cfg(feature = "mock-clock")]
+std::thread_local! {
+    /// `mock-clock` 下的唤醒登记；初值 `true`，让第一轮先把执行器跑一遍。
+    static WOKE_: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+}
+
 #[cfg(feature = "mock-clock")]
 impl LocalScope {
     /// 用**手动时钟**驱动本作用域：队列照常被驱动，而时间由测试自己推进。
@@ -398,11 +420,97 @@ impl LocalScope {
     {
         let handle = self.handle_.clone();
         let local = Rc::clone(&self.local_);
-        let supervisor = abs_art_mock_clock::Supervisor::new(body, clock.clone(), || false);
+        // tick 钩子 = 「自上一轮以来，本地任务有没有被唤醒过」。`LocalSet` 不给同步
+        // tick，因此用唤醒登记折算（见 [`WOKE_`]）；初值 `true` 让第一轮先把执行器
+        // 跑一遍——执行器没活时 `Supervisor` 才会推进时钟。
+        let woke = WOKE_.with(std::sync::Arc::clone);
+        woke.store(true, std::sync::atomic::Ordering::SeqCst);
+        let tick_woke = std::sync::Arc::clone(&woke);
+        let supervisor = abs_art_mock_clock::Supervisor::new(body, clock.clone(), move || {
+            tick_woke.swap(false, std::sync::atomic::Ordering::SeqCst)
+        });
         let run = move || handle.block_on(local.run_until(supervisor));
         match tokio::runtime::Handle::try_current() {
             Ok(_) => tokio::task::block_in_place(run),
             Err(_) => run(),
+        }
+    }
+}
+
+#[cfg(feature = "mock-clock")]
+mod mock_wake_ {
+    use core::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll, Waker},
+    };
+    use std::{
+        boxed::Box,
+        sync::{Arc, Mutex},
+        task::Wake,
+    };
+
+    /// 记录唤醒的包装 future（`inner_` 用 `Pin<Box<_>>` 以免除 `unsafe` 投影）。
+    pub(super) struct Tracked_<F> {
+        /// 被包装的任务。
+        inner_: Pin<Box<F>>,
+        /// 记录 waker 的共享状态（**构造时分配一次**）。
+        rec_: Arc<RecState_>,
+    }
+
+    impl<F> Tracked_<F> {
+        /// 用任务本体与唤醒登记构造包装。
+        pub(super) fn new_(inner: F, flag_: Arc<AtomicBool>) -> Self {
+            Self {
+                inner_: Box::pin(inner),
+                rec_: Arc::new(RecState_ {
+                    flag_,
+                    inner_: Mutex::new(Option::None),
+                }),
+            }
+        }
+    }
+
+    /// 记录并转发的 waker 状态。
+    ///
+    /// 它在任务**构造时**分配一次，之后每次 poll 只克隆 `Arc`（不触碰堆）——分配
+    /// 计数类用例（`smux_v1/tests/alloc_count.rs`）对「每次 poll 一次分配」很敏感。
+    struct RecState_ {
+        /// 共享的唤醒登记。
+        flag_: Arc<AtomicBool>,
+        /// 最近一次 poll 交进来的真实 waker。
+        inner_: Mutex<Option<Waker>>,
+    }
+
+    impl Wake for RecState_ {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.flag_.store(true, Ordering::SeqCst);
+            // 先取出再调用：不要持着锁进入别人的 waker。
+            let waker = self.inner_.lock().ok().and_then(|guard| guard.clone());
+            if let Some(waker) = waker {
+                waker.wake_by_ref();
+            }
+        }
+    }
+
+    impl<F: Future> Future for Tracked_<F> {
+        type Output = F::Output;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+            // 两个字段都是 `Unpin`（`Pin<Box<_>>` 与 `Arc<_>`），因此 `Tracked_` 自动
+            // `Unpin`，这里无需 `unsafe` 投影。
+            let this = self.get_mut();
+            if let Ok(mut guard) = this.rec_.inner_.lock() {
+                *guard = Option::Some(cx.waker().clone());
+            }
+            let waker = Waker::from(Arc::clone(&this.rec_));
+            let mut recorded_cx = Context::from_waker(&waker);
+            this.inner_.as_mut().poll(&mut recorded_cx)
         }
     }
 }
@@ -413,7 +521,7 @@ mod mock_clock_tests_ {
 
     use std::{rc::Rc, time::Duration};
 
-    use abs_art::{TrClock, TrDelay, TrLocalScope};
+    use abs_art::{TrClock, TrDelay, TrJoinHandle, TrLocalScope};
     use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
 
     /// 在独立线程上运行（理由见 `tests::in_fresh_thread_`）。
@@ -506,6 +614,79 @@ mod mock_clock_tests_ {
             assert_eq!(clock.now().as_millis(), 1_800_000);
             assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
             let _ = Rc::new(());
+        });
+    }
+
+    /// 让出一次执行权：自唤醒一次后返回 `Pending`。
+    ///
+    /// `wake_by_ref` 不可省——用于本文件里的「永远有活」任务时，它正是「每轮都重新
+    /// 就绪」的来源；缺了它任务会真的 park 下去，执行器随即变成「没活」。
+    async fn yield_once_() {
+        let mut first = true;
+        core::future::poll_fn(move |cx| {
+            if first {
+                first = false;
+                cx.waker().wake_by_ref();
+                core::task::Poll::Pending
+            } else {
+                core::task::Poll::Ready(())
+            }
+        })
+        .await;
+    }
+
+    /// 目标契约：**执行器还有活时不得消耗虚拟时间**。
+    ///
+    /// - 手段：放一个「每轮自唤醒」的本地任务（执行器因此始终有就绪工作），再让主体
+    ///   作 6 轮让出。
+    /// - 判断：这 6 轮之间的虚拟时刻推进量必须是 0。跨三端的最小复现与病因见
+    ///   `smux_v1/dev-notes/timer-mock-clock-and-generic-drop-20261006-1625.md` §11。
+    #[test]
+    fn busy_executor_does_not_advance_virtual_time() {
+        in_fresh_thread_(|| {
+            let rt = rt_();
+            let (scope, value) = rt.block_on(async {
+                let value = crate::current();
+                let scope = value.local_scope();
+                (scope, value)
+            });
+            let clock = ManualClock::new();
+            let timed = ManualTime::new(value, clock.clone());
+            let scope_spawn = scope.clone();
+            let task_timed = timed.clone();
+            let (start, end) = scope.block_on_advancing(&clock, async move {
+                // 周期定时器：保证时钟「有下一个到期时刻」可推。
+                scope_spawn
+                    .spawn_local(async move {
+                        loop {
+                            task_timed.delay(Duration::from_millis(500u64)).await;
+                        }
+                    })
+                    .detach();
+                // 【契约】再放一个「永远有活」的任务（每轮自唤醒）：执行器始终有
+                // 就绪工作，因此**不得**推进虚拟时钟。
+                scope_spawn
+                    .spawn_local(async move {
+                        loop {
+                            yield_once_().await;
+                        }
+                    })
+                    .detach();
+                for _ in 0..2 {
+                    yield_once_().await;
+                }
+                let start = timed.now();
+                for _ in 0..6 {
+                    yield_once_().await;
+                }
+                let end = timed.now();
+                (start, end)
+            });
+            assert_eq!(
+                (end - start).as_millis(),
+                0u128,
+                "执行器有活时不该消耗虚拟时间"
+            );
         });
     }
 }

@@ -1,4 +1,4 @@
-//! 统一驱动：把测试主体包一层「Pending 时 tick 执行器、推进时钟、自唤醒」。
+//! 统一驱动：把测试主体包一层「Pending 时先 tick 执行器；执行器没活才推进时钟；再自唤醒」。
 
 use alloc::boxed::Box;
 use core::{
@@ -10,31 +10,38 @@ use core::{
 use crate::clock::ManualClockApi;
 
 /// 连续「既没跑到任务、也没推进时钟」的轮数上限；超过即判定为真死锁。
-///
-/// 取 64 而不是 1：没有 tick 钩子的后端（tokio）需要靠自己的 `block_on` 在两次
-/// poll 之间推进被 spawn 的任务，可能要多轮才把定时器登记进来。
 const STALL_LIMIT_: u32 = 64;
 
-/// 「空闲即推进」的驱动适配器。
+/// 「执行器没活才推进」的驱动适配器。
 ///
 /// 把它交给后端的阻塞驱动入口（`block_on`）即可：
 ///
 /// ```text
-/// // smol
+/// // smol（本地队列有同步 tick）
 /// smol::block_on(Supervisor::new(body, clock.clone(), || executor.try_tick()))
-/// // compio
+/// // compio（`Runtime::run` 返回「队列里还有任务吗」）
 /// runtime.block_on(Supervisor::new(body, clock.clone(), || runtime.run()))
-/// // tokio（句柄没有 tick 钩子；LocalSet 承载 `!Send` 主体）
-/// handle.block_on(local.run_until(Supervisor::new(body, clock.clone(), || false)))
+/// // tokio（`LocalSet::tick` 是 crate 私有的；由本后端的「唤醒登记」折算出同义信号）
+/// handle.block_on(local.run_until(Supervisor::new(body, clock.clone(), || woke.take())))
 /// ```
 ///
 /// # 它做什么
 ///
 /// 每次被 poll：先驱动主体；主体 `Pending` 时依次
 ///
-/// 1. 调 `tick`（后端的执行器钩子：本轮有没有跑到任务）；
-/// 2. 若时钟未冻结，推进到下一个到期时刻（唤醒到期任务）；
+/// 1. 调 `tick`（后端的执行器钩子：**执行器这一轮还有活吗**）；
+/// 2. **连续两轮都没有活、且时钟未冻结**时，才推进到下一个到期时刻（唤醒到期任务）；
 /// 3. 自唤醒，请求外层驱动循环立刻再进一次。
+///
+/// 第 1、2 步的 `ran` 判据不可省：执行器还有就绪任务时推进，等于把本该由任务链一步
+/// 一步走完的事件顺序，压缩进「一个定时器周期」的虚拟时间里——凡是拿 `now` 做
+/// 判据的逻辑（空闲超时、保活、退避）都会在握手 / 事件链走完之前误触发。
+///
+/// **为什么是「连续两轮」而不是「一轮」**：唤醒是链式的，后端一次 tick 跑完当前
+/// 就绪任务后队列可能正好为空，而它刚刚唤醒的下一环还没被驱动。要求连续两轮都报
+/// 「没活」，才能把「链条真的走完了」与「链条正卡在两环之间」区分开。这样一来，
+/// 后端只需要回答「有没有活」，不必回答「唤醒链是否已经走完」——后者在 tokio /
+/// compio 的公开 API 上都拿不到。
 ///
 /// # Panics
 ///
@@ -49,6 +56,8 @@ pub struct Supervisor<F, C: ManualClockApi, T: Fn() -> bool> {
     tick_: Box<T>,
     /// 连续停滞轮数。
     stalled_: u32,
+    /// 连续「执行器没活」的轮数。
+    idle_streak_: u32,
 }
 
 impl<F, C: ManualClockApi, T: Fn() -> bool> Supervisor<F, C, T> {
@@ -59,6 +68,7 @@ impl<F, C: ManualClockApi, T: Fn() -> bool> Supervisor<F, C, T> {
             clock_: clock,
             tick_: Box::new(tick),
             stalled_: 0,
+            idle_streak_: 0,
         }
     }
 
@@ -80,11 +90,25 @@ impl<F: Future, C: ManualClockApi, T: Fn() -> bool> Future for Supervisor<F, C, 
             return Poll::Ready(value);
         }
 
+        // 「执行器还有活吗」由后端钩子回答。**有活就不推进**：此刻该做的是把执行器
+        // 继续跑下去，而不是把虚拟时间往前拨一个定时器周期。
         let ran = (this.tick_)();
-        let advanced = if this.clock_.is_frozen() {
+        if ran {
+            this.idle_streak_ = 0;
+        } else {
+            this.idle_streak_ = this.idle_streak_.saturating_add(1);
+        }
+        // 「连续两轮没活」才推进：单单一轮没活，可能只是「刚跑完最后一个任务、它唤醒
+        // 的下一环还没被驱动」。这样后端只需要报告「有没有活」，不必报告「唤醒链是否
+        // 已经走完」。
+        let advanced = if ran || this.clock_.is_frozen() || this.idle_streak_ < 2 {
             false
         } else {
-            this.clock_.try_advance_to_next()
+            let did = this.clock_.try_advance_to_next();
+            if did {
+                this.idle_streak_ = 0;
+            }
+            did
         };
 
         if ran || advanced {
