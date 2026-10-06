@@ -1,18 +1,28 @@
 //! # 设计意图
 //!
-//! 用**默认全能力** `Runtime<FULL>`（`Runtime` 不带参数时的默认值）验证：
+//! 用**本后端的完整能力集** `Runtime<{ TokioFull }>`（`TokioFull == 63`）验证：
 //!
-//! 1. **`FULL` 掩码 = 全部五个能力位**：`BLOCK_ON | DELAY | SPAWN_SEND |
-//!    SPAWN_LOCAL | SPAWN_BLOCKING`，一个值同时拥有全部能力；
+//! 1. **完整能力集 = 全部六个能力位**：`BLOCK_ON | DELAY | SPAWN_SEND |
+//!    SPAWN_LOCAL | SPAWN_BLOCKING | CLOCK`（`TokioFull` 是 tokio 后端自己的
+//!    `FULL`），一个值同时拥有全部能力；
 //! 2. **两件套协同**：同一份业务流程里交替使用值上的
 //!    `spawn` / `delay` / `spawn_blocking` / `block_on`，以及作用域上的
 //!    `spawn_local` / `run_until`；
 //! 3. **后端自省**：`rt.tag()`（固有方法）与 `rt.about()`（`TrAsyncRuntime`）
 //!    都能报告当前后端身份，集成方可据此做运行时自省 / 断言。
 //!
+//! # 为什么这里写 `TokioFull` 而不是裸名 `FULL`
+//!
+//! `abs_art-bridge` 的裸名 `FULL` 是**默认后端**的完整能力集。在 workspace 的
+//! feature 并集构建下默认后端是 compio，裸 `FULL` 因此等于 compio 的 `59`
+//! （**不含** `SPAWN_SEND`）——用它写 tokio 组的「全能力」会**静默少一位**，
+//! `rt.spawn(..)` 直接不可用，而错误信息只会说「没有 `spawn` 方法」。具名的
+//! `TokioFull` / `CompioFull` 随各自后端的 feature 存在，在并集构建下也精确，
+//! 因此本 crate 的 [`abs_art_demo::FullRt`] 与 `current()` 一律取具名常量。
+//!
 //! # 为什么必须是两件套
 //!
-//! `FULL` 值同时具备五种能力，但**本地队列不在值里**：`SPAWN_LOCAL` 位只让
+//! `TokioFull` 值同时具备六种能力，但**本地队列不在值里**：`SPAWN_LOCAL` 位只让
 //! `Runtime::local_scope()` 可用，队列本身由交出的作用域值承载。于是本示例的
 //! 结构是：
 //!
@@ -24,16 +34,16 @@
 //!
 //! # 可以做到
 //!
-//! - 一个 `Runtime<FULL>` 值同时满足全部能力 trait；
+//! - 一个 `Runtime<{ TokioFull }>` 值同时满足全部能力 trait；
 //! - 在同一个 async 块中混用多种能力（值上的 + 作用域上的）；
 //! - 自省后端身份（`tag()` / `about()`）。
 //!
 //! # 不能做到
 //!
-//! - `FULL` 不提供后端**特有 API**（tokio 的 `sync::Mutex`、compio 的 IOCP
+//! - 完整能力集不提供后端**特有 API**（tokio 的 `sync::Mutex`、compio 的 IOCP
 //!   事件、smol 的 `async_io` 设施等）——抽象层只承诺这几种能力，超出即不承诺；
-//! - 能力在**运行期不能增减**：声明是编译期常量，`FULL` 与 `Runtime<0>` 之间
-//!   没有动态转换（`Runtime::retag` 只能换同后端的能力标签，不会改变运行期
+//! - 能力在**运行期不能增减**：声明是编译期常量，`TokioFull` 与 `Runtime<0>`
+//!   之间没有动态转换（`Runtime::retag` 只能换同后端的能力标签，不会改变运行期
 //!   指向的对象）；
 //! - **`SPAWN_LOCAL` 位与作用域缺一不可**：本地投递既要求声明（位），也要求真
 //!   的取到作用域值——两者各管一半，见 `cap_spawn_local`；
@@ -43,12 +53,15 @@
 use std::time::Duration;
 
 use bridge_tokio::{
-    FULL, TokioRuntime as Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
+    TokioFull, TokioRuntime as Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend,
 };
 
-/// FULL 能力声明（默认值）：也可以直接写 `Runtime`，默认参数就是 FULL。
-type FullRt = Runtime<FULL>;
+/// 能力声明：**tokio 后端的完整能力集** `TokioFull`（`63`，六位全置）。
+///
+/// 刻意不用裸名 `FULL`：那是默认后端的完整能力集（并集构建下 = compio 的
+/// `59`），会让本组静默缺掉 `SPAWN_SEND` 一位。详见文件头部说明。
+type FullRt = Runtime<{ TokioFull }>;
 
 /// 多能力业务函数（A 部分）：spawn + delay + spawn_blocking。
 ///

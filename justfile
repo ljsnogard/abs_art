@@ -1,6 +1,7 @@
 test:
     cargo test --workspace
     cargo run -q -p abs_art-demo
+    just test-mock-clock
 
 # 运行 abs_art-demo 的 tokio 组 cap smoke tests（examples/tokio_demo/）
 # 缺省演示组是 compio，因此这里必须显式关掉缺省 features 再选 tokio 组。
@@ -48,3 +49,16 @@ test-backend-smol:
 # 本配方同时是那次改造的验收标准与回归防线。
 smoke:
     cargo test -p abs_art-smoke
+
+# 虚拟（手动）时钟：独立的 `abs_art-mock_clock` + 三个后端的可选 `mock-clock` feature。
+#
+# 每个后端都跑：
+# - 本 crate 的单元测试（时钟推进/唤醒语义、驱动停滞判定、装饰器委托）；
+# - 「虚拟一小时在真实时间里瞬间完成」与「投递到本地队列的任务也跑在虚拟时间上」。
+#
+# 注意：`mock-clock` **不在**任何后端的默认 features 里——它是测试设施，按需开启。
+test-mock-clock:
+    cargo test -p abs_art-mock_clock
+    cargo test -p abs_art-tokio --features mock-clock
+    cargo test -p abs_art-compio --features mock-clock
+    cargo test -p abs_art-smol --features mock-clock

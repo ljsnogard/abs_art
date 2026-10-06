@@ -113,6 +113,30 @@ use core::{
 /// ```
 pub trait TrClock {
     /// 本运行时值的时刻类型。
+    ///
+    /// # 为什么用**结构约束**而不是一条 `TrInstant` trait
+    ///
+    /// 这四条约束就是「什么是时刻」的定义；具体类型由各后端 `type Instant` 给出
+    /// （tokio → `tokio::time::Instant`；compio / smol → `std::time::Instant`）。
+    /// 曾经评估过把它收进一条具名 trait，实测结论是**不值得**：
+    ///
+    /// 1. **非 blanket 的 trait 写不出来**：trait 的所有者之外，任何 crate 想给
+    ///    `tokio::time::Instant` / `std::time::Instant` 登记实现都是 `E0117`
+    ///    （trait 与类型都外来）；而所有者自己写下 blanket impl 之后，下游再手写
+    ///    就是 `E0119`（冲突）。所以具名 trait 只剩 blanket 一种形态。
+    /// 2. **blanket 形态与结构约束等价**：它只多一个短名字与一处文档位置，却让
+    ///    「任何满足约束的类型都自动算」永久不可收窄，收益不明显而扩展麻烦。
+    /// 3. **与生态互通反而不需要它**：`embedded-timers` 同时提供了 `Instant` trait 与
+    ///    `Instant64` / `TimespecInstant` 具体类型，而这些类型**已经满足**下面四条
+    ///    约束（实测）。自造 trait 只会引出「谁的 `Instant` trait 说了算」的竞争。
+    ///
+    /// 需要「测试自己推进的时刻」（虚拟时钟）时，见特例 [`TrMockClock`]：能力 trait 就在
+    /// 本 crate，而**实现**（手动时钟状态、到期唤醒表、delay、驱动）住在独立的
+    /// `abs_art-mock_clock` crate 里，三个后端各以可选 feature `mock-clock` 接入。
+    ///
+    /// 实测证据：`abs_art_runtime_probe/p8_instant_trait/`（`E0117` / `E0119` 两份原始日志）
+    /// 与 `abs_art_runtime_probe/z_clock/`；裁决记录见
+    /// `dev-notes/instant-trait-and-manual-clock-20261006-1140.md`。
     type Instant: Copy
         + Ord
         + Add<Duration, Output = Self::Instant>
@@ -121,6 +145,77 @@ pub trait TrClock {
 
     /// 读取当前时刻（与本运行时的计时器同一时间基准）。
     fn now(&self) -> Self::Instant;
+}
+
+/// **可手动推进的时钟**——[`TrClock`] 的**特例**（超 trait）。
+///
+/// [`TrClock`] 只保证「能读这个运行时值的时刻」（它可能是真实时间，也可能是可暂停的
+/// 虚拟时间）；本 trait 额外保证**时刻可以被调用方推进**。因此它只应由测试设施实现
+/// （例如独立的 `abs_art-mock_clock` crate），业务代码永远只约束 [`TrClock`]。
+///
+/// # 为什么是特例，而不是并列的第二种时钟
+///
+/// 1. **并列会重新制造「两个时钟源」的错配**——而这正是 [`TrClock`] 存在的理由。
+///    若一个值同时提供「真实时钟」与「虚拟时钟」，`TrTime: TrDelay + TrClock` 只能绑定
+///    其中一个 `Instant`：业务代码读到真实时刻、而 `delay` 睡在虚拟时钟上——空闲超时
+///    永不触发这类 bug 就会原样复现（见 `dev-notes/bridge-scope-clock-20261005-1615.md` §3.1）。
+/// 2. **Rust 表达不了 `R: TrClock + !TrMockClock`**，所以「并列」买不到任何强制力，
+///    却付出了两个源的代价。特例模型下**一个值只有一个时钟**，同源性质天然成立：
+///    测试约束 `R: TrMockClock`，业务只约束 `R: TrClock`，同一份业务代码在真实与虚拟
+///    时间下零改动。
+/// 3. **tokio 原生就是这个模型**：`test-util` 下 `Instant::now()` 与 `pause()` / `advance()`
+///    用的是同一个 `tokio::time::Instant`、同一个时间源；compio / smol 则由装饰器
+///    （`ManualTime`）提供同一个模型。
+///
+/// # 为什么 `advance` 是 **future**（参考 `tokio::time::advance`）
+///
+/// 推进时间不是一个纯状态写入：被唤醒的任务需要**有机会被调度**（登记新的定时器、
+/// 跑完自己的 poll）。tokio 因此把 `advance` / `advance_until` 做成 async；这里照做，
+/// 于是调用点形状与 tokio 一致（`rt.advance(d).await`），也避免了「同步推进完就断言」
+/// 这种与真实运行时语义不符的用法。
+///
+/// # 实现契约
+///
+/// 1. `advance` / `advance_until` 在返回的 future **被 poll 时**推进时刻，并唤醒期间
+///    到期的任务；推进到目标之后 future 才算完成；
+/// 2. [`pause`](Self::pause) 之后，测试设施自带的「空闲即推进」驱动**必须停止**自动
+///    推进（驱动读 [`is_paused`](Self::is_paused)），由调用方显式 `advance*` 控制；
+/// 3. 时刻必须与 [`TrDelay`] / [`TrTime`] **同源**——这也是 `TrTime: TrDelay + TrClock`
+///    那条结构约束在虚拟时间下的延续。
+///
+/// # Examples
+///
+/// ```
+/// use core::time::Duration;
+///
+/// use abs_art::{TrDelay, TrMockClock};
+///
+/// /// 测试主体：自己把虚拟时间推 1 小时，再等一个「1 小时」的 delay。
+/// /// 业务代码只约束 `TrDelay`，测试代码才约束 `TrMockClock`。
+/// async fn test_body<R>(rt: &R)
+/// where
+///     R: TrDelay + TrMockClock,
+/// {
+///     rt.advance(Duration::from_secs(3_600)).await;
+///     rt.delay(Duration::from_millis(1)).await;
+/// }
+/// ```
+pub trait TrMockClock: TrClock {
+    /// 冻结时钟：测试设施的自动推进停止，只有显式 `advance*` 才让时间走。
+    fn pause(&self);
+
+    /// 解冻：恢复自动推进。
+    fn resume(&self);
+
+    /// 当前是否被冻结。
+    fn is_paused(&self) -> bool;
+
+    /// 把时钟推进 `by`（参考 `tokio::time::advance`）。
+    fn advance(&self, by: Duration) -> impl Future<Output = ()>;
+
+    /// 把时钟推进到 `at`（参考 `tokio::time::advance_until`）；
+    /// 若当前时刻已在 `at` 之后，则什么也不做。
+    fn advance_until(&self, at: Self::Instant) -> impl Future<Output = ()>;
 }
 
 /// 后端的**计时能力**：按周期唤醒，以及带超时地等一个 future。

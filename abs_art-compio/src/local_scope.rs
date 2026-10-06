@@ -166,10 +166,12 @@ mod tests {
 
     use std::{cell::Cell, rc::Rc, time::Duration};
 
-    use abs_art::{FULL, SPAWN_LOCAL, TrDelay, TrJoinHandle, TrLocalScope};
+    use abs_art::{SPAWN_LOCAL, TrDelay, TrJoinHandle, TrLocalScope};
     use compio::runtime::Runtime as CompioRuntime;
 
-    use crate::Runtime;
+    // 注意：这里用的是**本 crate 的** `FULL`（不含 `SPAWN_SEND`，即 `59`），
+    // 不是 `abs_art::FULL`（`63`，含 `SPAWN_SEND`）。后者会撞上 `CompioCaps_` 断言。
+    use crate::{FULL, Runtime};
 
     /// 目的：验证 `run_until` / 本地投递能让 `!Send` 任务跑完，且结果能经句柄取回。
     ///
@@ -358,5 +360,107 @@ mod tests {
 
         assert_eq!(value.block_on(async { 6u32 }), 6);
         assert_eq!(scope.block_on(async { 7u32 }), 7);
+    }
+}
+
+#[cfg(feature = "mock-clock")]
+impl LocalScope {
+    /// 用**手动时钟**驱动本作用域：队列照常被驱动，而时间由测试自己推进。
+    ///
+    /// compio 的执行器就在本作用域钉住的运行时里，因此 tick 钩子直接用它自己的
+    /// [`compio::runtime::Runtime::run`]（返回「队列里是否还有任务」）——这正是
+    /// 「空闲即推进」的判据。
+    ///
+    /// # Panics
+    ///
+    /// 主体既没有就绪任务、也没有可推进的定时器时 panic（把静默挂起变成响亮失败）。
+    pub fn block_on_advancing<F, C>(&self, clock: &C, body: F) -> <F as Future>::Output
+    where
+        F: Future,
+        C: abs_art_mock_clock::ManualClockApi,
+    {
+        let rt = self.rt_.clone();
+        let ticker = self.rt_.clone();
+        rt.block_on(abs_art_mock_clock::Supervisor::new(
+            body,
+            clock.clone(),
+            move || ticker.run(),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "mock-clock"))]
+mod mock_clock_tests_ {
+    //! compio 后端接上手动时钟之后的虚拟时间行为。
+
+    use std::time::Duration;
+
+    use abs_art::{TrClock, TrDelay, TrLocalScope};
+    use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
+
+    /// 目的：验证「虚拟一小时」在真实时间里几乎瞬间完成。
+    ///
+    /// 手段：取运行时值与作用域，`ManualTime` 装饰后 `block_on_advancing` 跑 `delay(1h)`。
+    ///
+    /// 通过依据：真实耗时 < 1s，虚拟时刻恰为 3600_000ms。
+    #[test]
+    fn virtual_hour_passes_instantly() {
+        let rt = compio::runtime::Runtime::new().expect("建 compio 运行时");
+        let (scope, value) = rt.block_on(async {
+            let value = crate::current();
+            let scope = value.local_scope();
+            (scope, value)
+        });
+
+        let clock = ManualClock::new();
+        let timed = ManualTime::new(value, clock.clone());
+
+        let started = std::time::Instant::now();
+        let virtual_now = scope.block_on_advancing(&clock, async {
+            timed.delay(Duration::from_secs(3_600)).await;
+            timed.now()
+        });
+        let real = started.elapsed();
+
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+        assert_eq!(virtual_now.as_millis(), 3_600_000);
+    }
+
+    /// 目的：验证**投递到本地队列的任务**同样跑在虚拟时间上。
+    ///
+    /// 手段：`spawn_local` 一个睡虚拟 30 分钟的任务，主体 await 其句柄。
+    ///
+    /// 通过依据：取回 42，虚拟时刻推进到 1800_000ms，真实耗时 < 1s。
+    #[test]
+    fn spawned_local_task_runs_on_virtual_time() {
+        let rt = compio::runtime::Runtime::new().expect("建 compio 运行时");
+        let (scope, value) = rt.block_on(async {
+            let value = crate::current();
+            let scope = value.local_scope();
+            (scope, value)
+        });
+
+        let clock = ManualClock::new();
+        let scope_in_body = scope.clone();
+        let started = std::time::Instant::now();
+        let out = scope.block_on_advancing(&clock, {
+            let clock = clock.clone();
+            async move {
+                let handle = scope_in_body.spawn_local({
+                    let clock = clock.clone();
+                    async move {
+                        let timed = ManualTime::new(value, clock);
+                        timed.delay(Duration::from_secs(1_800)).await;
+                        42u32
+                    }
+                });
+                handle.await.unwrap()
+            }
+        });
+        let real = started.elapsed();
+
+        assert_eq!(out, 42);
+        assert_eq!(clock.now().as_millis(), 1_800_000);
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
     }
 }

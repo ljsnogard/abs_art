@@ -346,3 +346,95 @@ mod tests {
         take_handle_(scope.spawn_local(async { 1u32 }));
     }
 }
+
+#[cfg(feature = "mock-clock")]
+impl LocalScope {
+    /// 用**手动时钟**驱动本作用域：队列照常被驱动，而时间由测试自己推进。
+    ///
+    /// tick 钩子用 `LocalExecutor::try_tick()`（返回「本轮有没有跑到任务」）——这正是
+    /// 「空闲即推进」的判据。
+    ///
+    /// # Panics
+    ///
+    /// 主体既没有就绪任务、也没有可推进的定时器时 panic（把静默挂起变成响亮失败）。
+    pub fn block_on_advancing<F, C>(&self, clock: &C, body: F) -> <F as Future>::Output
+    where
+        F: Future,
+        C: abs_art_mock_clock::ManualClockApi,
+    {
+        let ticker = Rc::clone(&self.local_);
+        smol::block_on(abs_art_mock_clock::Supervisor::new(
+            body,
+            clock.clone(),
+            move || ticker.try_tick(),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "mock-clock"))]
+mod mock_clock_tests_ {
+    //! smol 后端接上手动时钟之后的虚拟时间行为。
+
+    use std::time::Duration;
+
+    use abs_art::{TrClock, TrDelay, TrLocalScope};
+    use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
+
+    /// 目的：验证「虚拟一小时」在真实时间里几乎瞬间完成。
+    ///
+    /// 手段：smol 无环境运行时前提，直接取值与作用域，`block_on_advancing` 跑 `delay(1h)`。
+    ///
+    /// 通过依据：真实耗时 < 1s，虚拟时刻恰为 3600_000ms。
+    #[test]
+    fn virtual_hour_passes_instantly() {
+        let value = crate::current();
+        let scope = value.local_scope();
+
+        let clock = ManualClock::new();
+        let timed = ManualTime::new(value, clock.clone());
+
+        let started = std::time::Instant::now();
+        let virtual_now = scope.block_on_advancing(&clock, async {
+            timed.delay(Duration::from_secs(3_600)).await;
+            timed.now()
+        });
+        let real = started.elapsed();
+
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+        assert_eq!(virtual_now.as_millis(), 3_600_000);
+    }
+
+    /// 目的：验证**投递到本地队列的任务**同样跑在虚拟时间上。
+    ///
+    /// 手段：`spawn_local` 一个睡虚拟 30 分钟的任务，主体 await 其句柄。
+    ///
+    /// 通过依据：取回 42，虚拟时刻推进到 1800_000ms，真实耗时 < 1s。
+    #[test]
+    fn spawned_local_task_runs_on_virtual_time() {
+        let value = crate::current();
+        let scope = value.local_scope();
+
+        let clock = ManualClock::new();
+        let scope_in_body = scope.clone();
+        let started = std::time::Instant::now();
+        let out = scope.block_on_advancing(&clock, {
+            let clock = clock.clone();
+            async move {
+                let handle = scope_in_body.spawn_local({
+                    let clock = clock.clone();
+                    async move {
+                        let timed = ManualTime::new(value, clock);
+                        timed.delay(Duration::from_secs(1_800)).await;
+                        42u32
+                    }
+                });
+                handle.await.unwrap()
+            }
+        });
+        let real = started.elapsed();
+
+        assert_eq!(out, 42);
+        assert_eq!(clock.now().as_millis(), 1_800_000);
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+    }
+}

@@ -12,7 +12,7 @@ use compio::runtime::Runtime as CompioRuntime;
 
 use abs_art::{HasDelay, TrDelay};
 
-use crate::{Runtime, join_handle::JoinHandle};
+use crate::{CompioCaps_, Runtime, join_handle::JoinHandle};
 
 /// 异步地睡眠 `duration`。
 ///
@@ -48,6 +48,7 @@ where
 impl<const CAPS: usize> TrDelay for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
+    [(); CAPS]: CompioCaps_,
 {
     /// 本后端的睡眠 future 类型。
     ///

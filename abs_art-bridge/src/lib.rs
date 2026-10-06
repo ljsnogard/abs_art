@@ -70,10 +70,75 @@
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
+    BLOCK_ON, CLOCK, DELAY, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
     TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
-    TrSpawnBlocking, TrSpawnSend, TrTime,
+    TrMockClock, TrSpawnBlocking, TrSpawnSend, TrTime,
 };
+
+// ── 「完整能力集」按**后端**给，而不是按位集合给 ───────────────────────────
+//
+// `abs_art::FULL` 是「所有位」；但每个后端**实现得了的**位不同：compio 没有跨线程
+// 全局队列，它的 `FULL` 不含 `SPAWN_SEND`。所以这里：
+// - 裸名 `FULL` = **当前默认后端**的完整能力集；
+// - 具名 `TokioFull` / `CompioFull` / `SmolFull` = 各后端自己的完整能力集
+//   （只要该后端的 feature 开启就存在，因此 `cargo test --workspace` 的 feature
+//   并集下仍然精确）。
+#[cfg(any(
+    all(
+        feature = "default-backend-tokio",
+        not(feature = "default-backend-compio"),
+        not(feature = "default-backend-smol"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        feature = "backend-tokio",
+        not(feature = "backend-compio"),
+        not(feature = "backend-smol"),
+    ),
+))]
+pub use abs_art_tokio::FULL;
+
+#[cfg(any(
+    all(
+        feature = "default-backend-compio",
+        not(feature = "default-backend-tokio"),
+        not(feature = "default-backend-smol"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        not(feature = "backend-tokio"),
+        feature = "backend-compio",
+        not(feature = "backend-smol"),
+    ),
+))]
+pub use abs_art_compio::FULL;
+
+#[cfg(any(
+    all(
+        feature = "default-backend-smol",
+        not(feature = "default-backend-tokio"),
+        not(feature = "default-backend-compio"),
+    ),
+    all(
+        not(any(
+            feature = "default-backend-tokio",
+            feature = "default-backend-compio",
+            feature = "default-backend-smol",
+        )),
+        not(feature = "backend-tokio"),
+        not(feature = "backend-compio"),
+        feature = "backend-smol",
+    ),
+))]
+pub use abs_art_smol::FULL;
 
 /// 当前**默认**后端提供的运行时类型。
 ///
@@ -261,6 +326,18 @@ pub use abs_art_compio::current;
     ),
 ))]
 pub use abs_art_smol::current;
+
+/// 具名别名：tokio 后端的完整能力集。
+#[cfg(feature = "backend-tokio")]
+pub use abs_art_tokio::FULL as TokioFull;
+
+/// 具名别名：compio 后端的完整能力集（不含 `SPAWN_SEND`）。
+#[cfg(feature = "backend-compio")]
+pub use abs_art_compio::FULL as CompioFull;
+
+/// 具名别名：smol 后端的完整能力集。
+#[cfg(feature = "backend-smol")]
+pub use abs_art_smol::FULL as SmolFull;
 
 /// 具名别名：tokio 后端的本地作用域类型。
 #[cfg(feature = "backend-tokio")]

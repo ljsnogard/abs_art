@@ -1,14 +1,17 @@
 //! # 设计意图
 //!
-//! 用**单能力** `Runtime<{ DELAY }>` 验证「时间驱动」能力：
+//! 用**计时 + 时刻**两位能力 `Runtime<{ DELAY | CLOCK }>` 验证「时间驱动」能力：
 //!
 //! 1. **`TrDelay` 作为独立能力**：`delay` 返回一个「等待指定时长后完成」的
-//!    future，能力声明可以只要 `DELAY`，不声明任何其它能力；
+//!    future，它只要求 `DELAY` 这一位；而**读时刻**是**另一位**能力
+//!    （`CLOCK`，`1 << 5`）——「能等」与「能读表现在几点」是两件事；
 //! 2. **时间抽象与后端解耦**：业务代码只依赖 `TrDelay` / `TrClock`，不感知
 //!    tokio 的 `time::sleep` / smol 的 `Timer` / compio 的时间设施；
 //! 3. **时刻与计时同源**：`TrClock::now()` 也从**同一个运行时值**上取——这正是
 //!    把时刻做成 `TrTime` 超 trait 的目的（避免「睡在虚拟时钟上、读在墙上时钟
-//!    上」这类错配）；
+//!    上」这类错配）。代价是连锁的：`TrTime: TrDelay + TrClock`，所以
+//!    `delay` / `now` / `timeout` 三者齐备的最小声明是 `{ DELAY | CLOCK }`；
+//!    **只写 `DELAY` 时 `now()` 会被编译期拒绝**（`HasClock` 不满足）；
 //! 4. 连续多次 `delay` 可以串联成周期性节奏（tick）。
 //!
 //! # 计时属于运行时值，不属于作用域
@@ -36,11 +39,14 @@
 
 use std::time::{Duration, Instant};
 
-use bridge_tokio::{DELAY, TokioRuntime as Runtime, TrClock, TrDelay};
+use bridge_tokio::{CLOCK, DELAY, TokioRuntime as Runtime, TrClock, TrDelay};
 
-/// 能力声明：只请求 `delay` 一位——按抽象层的设计，这一位同时覆盖
-/// `TrDelay`（睡眠）与 `TrClock`（时刻）。
-type DelayRt = Runtime<{ DELAY }>;
+/// 能力声明：`DELAY | CLOCK` **两位**——`delay` 只要 `DELAY`，而 `now()` 要
+/// `CLOCK`（读时刻是独立的一位能力，不复用 `DELAY`）。
+///
+/// 本示例里 `clock_is_monotonic_` 会调 `rt.now()`，因此必须写上 `CLOCK`；
+/// 若只写 `DELAY`，那行会以「`TrClock` 的 impl 条件不满足」被编译期拒绝。
+type DelayRt = Runtime<{ DELAY | CLOCK }>;
 
 /// 业务函数 A：在这个运行时值上睡眠至少 `ms` 毫秒，返回实际经过的毫秒数。
 async fn wait_at_least_(rt: &DelayRt, ms: u64) -> u128 {

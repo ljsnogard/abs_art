@@ -46,11 +46,11 @@ pub mod runtime;
 pub mod time;
 
 pub use caps::{
-    BLOCK_ON, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, HasBlockOn,
-    HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend,
+    BLOCK_ON, CLOCK, DELAY, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, HasBlockOn,
+    HasClock, HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend,
 };
 pub use runtime::{
     RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrJoinHandle, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend,
 };
-pub use time::{Elapsed, Timeout, TrClock, TrInterval, TrTime, UnitFuture};
+pub use time::{Elapsed, Timeout, TrClock, TrInterval, TrMockClock, TrTime, UnitFuture};

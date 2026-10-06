@@ -15,6 +15,46 @@
 //!
 //! 与 `delay` 共用 `delay` feature：两者要的是同一个驱动器（async-io 的反应器）。
 //!
+//! # 能力位：读时刻要 `CLOCK`，周期与超时要 `DELAY + CLOCK`
+//!
+//! [`TrClock`] 门控在 [`CLOCK`](abs_art::CLOCK) 上（`delay` 只要求
+//! [`DELAY`](abs_art::DELAY)）：**能等**与**能读表现在几点**是两件事，读时刻不需要
+//! 反应器跑起来。
+//!
+//! [`TrTime`]（`interval` / `timeout`）门控在 `DELAY` **与** `CLOCK` 两者上——这不是
+//! 随手加的一条，而是「同源」那条结构约束的直接后果：`TrTime: TrDelay + TrClock`
+//! 要求有周期源的值必然也能报时刻，所以**要 `interval` / `timeout` 就得同时声明
+//! `CLOCK`**。只声明 `DELAY` 时 `delay` 仍然可用，而 `now()` 不可用。
+//!
+//! 下面一对文档测试（一负一正）钉住这条门控：
+//!
+//! - **目的**：只声明 `DELAY` 时 `now()` 不可用；声明 `DELAY | CLOCK` 时 `now()` 与
+//!   `interval` 都可用。
+//! - **手段**：负例在 `Runtime<{ DELAY }>` 上调用 `now()` 并标为 `compile_fail`；
+//!   正例在 `Runtime<{ DELAY | CLOCK }>` 上调用同一方法，再取一个周期源。
+//! - **判断**：负例编译失败、正例编译并运行成功，两者**同时**成立才算门控被正确钉住
+//!   ——正例还排除了「负例因别的原因失败」这种假通过。
+//!
+//! ```compile_fail
+//! use abs_art::DELAY;
+//! use abs_art_smol::Runtime;
+//!
+//! // 只有 `DELAY`：`Runtime<{ DELAY }>` 没有实现 `TrClock`
+//! let rt = Runtime::<{ DELAY }>::current();
+//! let _ = rt.now(); // 编译失败：当前类型上找不到 `now`
+//! ```
+//!
+//! 正例（两个位都声明，两者都可用）：
+//!
+//! ```
+//! use abs_art::{CLOCK, DELAY, TrClock, TrTime};
+//! use abs_art_smol::Runtime;
+//!
+//! let value = Runtime::<{ DELAY | CLOCK }>::current();
+//! let _ = value.now(); // CLOCK → `TrClock` 可用
+//! let _ = value.interval(core::time::Duration::from_secs(60)); // DELAY | CLOCK → `TrTime` 可用
+//! ```
+//!
 //! # 为什么 `TrClock::Instant` 取 `std::time::Instant`
 //!
 //! [`TrClock`] 要求 `Instant: Copy + Ord + Add<Duration, Output = Self> +
@@ -45,7 +85,7 @@ use core::{
     time::Duration,
 };
 
-use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
+use abs_art::{HasClock, HasDelay, TrClock, TrInterval, TrTime};
 
 use crate::Runtime;
 
@@ -94,7 +134,7 @@ impl TrInterval for Interval {
 
 impl<const CAPS: usize> TrClock for Runtime<CAPS>
 where
-    [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
 {
     /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：async-io 的计时器
     /// 内部用的就是 `std::time::Instant`（见模块文档的约束表）。
@@ -109,6 +149,7 @@ where
 impl<const CAPS: usize> TrTime for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
 {
     type Interval = Interval;
 
@@ -140,7 +181,7 @@ mod tests {
 
     use core::ops::{Add, Sub};
 
-    use abs_art::{DELAY, FULL, TrDelay};
+    use abs_art::{CLOCK, DELAY, FULL, TrDelay};
 
     use super::*;
 
@@ -274,18 +315,20 @@ mod tests {
         assert!(deadline > rt.now(), "now() + Duration 必须是未来时刻");
     }
 
-    /// 目的：验证 `TrClock` 与 `TrTime` 的能力位门控确实挂在 `DELAY` 上
-    /// （「声明了 `DELAY` 才有时钟与周期源」）。
+    /// 目的：验证 `TrClock` 门控在 `CLOCK` 上、`TrTime` 门控在 `DELAY + CLOCK` 上
+    ///（「同时声明两位才有时刻与周期源」）。
     ///
-    /// 手段：编译期断言只声明 `DELAY` 一位的 `Runtime<{ DELAY }>` 同时实现了
-    /// `TrClock` 与 `TrTime`。
+    /// 手段：编译期断言同时声明 `DELAY` 与 `CLOCK` 两位的 `Runtime<{ DELAY | CLOCK }>`
+    /// 实现了 `TrClock` 与 `TrTime`。
     ///
-    /// 判定：编译通过即为通过；若把门控错标在别的位上，本测试无法编译。
+    /// 判定：编译通过即为通过——这是**正面**一半；反面一半（只声明 `DELAY` 时
+    /// `now()` 不可用）由本模块文档的 `compile_fail` 用例钉住。若把门控错标在
+    /// 别的位上，本测试无法编译。
     #[test]
-    fn declared_delay_cap_gives_clock_and_interval() {
+    fn declared_delay_and_clock_caps_give_now_and_interval() {
         fn assert_clock_<T: TrClock>() {}
         fn assert_time_<T: TrTime>() {}
-        assert_clock_::<Runtime<{ DELAY }>>();
-        assert_time_::<Runtime<{ DELAY }>>();
+        assert_clock_::<Runtime<{ DELAY | CLOCK }>>();
+        assert_time_::<Runtime<{ DELAY | CLOCK }>>();
     }
 }

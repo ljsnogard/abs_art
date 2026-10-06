@@ -11,11 +11,11 @@
 //! # 后端选择（本 crate 的 features）
 //!
 //! `Cargo.toml` 里 `demo-tokio` 与 `demo-compio` **互斥**，一次构建只能启用
-//! 一个：
+//! 一个（缺省是 **compio 组**，与 `abs_art-bridge` 的缺省后端一致）：
 //!
 //! ```text
-//! cargo run -p abs_art-demo                                        # tokio 组（默认）
-//! cargo run -p abs_art-demo --no-default-features --features demo-compio   # compio 组
+//! cargo run -p abs_art-demo                                              # compio 组（默认）
+//! cargo run -p abs_art-demo --no-default-features --features demo-tokio  # tokio 组
 //! ```
 //!
 //! 本 crate 把同一个 `abs_art-bridge` 以两个 backend 实例化（重命名依赖
@@ -38,6 +38,14 @@
 //! 里、出现在 diff 与 code review 中。作用域**不**实现 [`TrDelay`] /
 //! [`TrClock`] / [`TrTime`]：计时与时刻一律从运行时值上取。
 //!
+//! 能力位共**六个**（`0..=63`）：`BLOCK_ON` / `DELAY` / `SPAWN_SEND` /
+//! `SPAWN_LOCAL` / `SPAWN_BLOCKING` / **`CLOCK`**（`1 << 5`）。其中 `CLOCK`
+//! 只负责「读时刻」：`impl TrClock` 要求 `[(); CAPS]: HasClock`，而
+//! `TrTime: TrDelay + TrClock`，所以 `interval` / `timeout` **同时要 `DELAY`
+//! 与 `CLOCK`**。**没写 `CLOCK` 就没有 `now()`**——只写 `DELAY` 只能睡，不能读表。
+//! 本 crate 里凡是调用 `now()` / `timeout(..)` 的类型别名都写
+//! `{ DELAY | CLOCK }`（见 [`DelayRt`]）。
+//!
 //! 另有一条分工必须记住：**`Runtime::block_on(f)` 不驱动本地队列**，
 //! `scope.block_on(f)` 才驱动队列。两者语义不同，见各函数文档。
 //!
@@ -48,16 +56,36 @@
 //! 代码」只能建立在**共同子集**上：
 //!
 //! ```text
-//! TrBlockOn + TrDelay / TrTime / TrClock + TrSpawnBlocking + TrLocalScope
-//! （不含 TrSpawnSend）
+//! TrBlockOn + TrDelay + TrClock / TrTime + TrSpawnBlocking + TrLocalScope
+//! （不含 TrSpawnSend；掩码上 TrTime 还要 CLOCK 那一位，见 [`DelayRt`]）
 //! ```
 //!
-//! 本 crate 据此把业务项分成三组：
+//! # 「全能力」必须按后端具名：裸 `FULL` 与 `TokioFull` / `CompioFull`
+//!
+//! `abs_art` 的 `FULL` 是**位集合**意义上的「全部」（六位全置，`63`），不代表
+//! 每个后端都兑现得了。`abs_art-bridge` 因此给两套名字：
+//!
+//! - **裸名 `FULL`** = **默认后端**的完整能力集。在 workspace 的 feature 并集
+//!   构建下，默认后端是 compio，于是裸 `FULL == 59`（不含 `SPAWN_SEND`）——
+//!   拿它当 tokio 组的「全能力」会**静默少一位**，`rt.spawn(..)` 直接不可用；
+//! - **具名 `TokioFull` / `CompioFull` / `SmolFull`** = 各后端**自己的**完整能力
+//!   集，只要该后端的 feature 开启就存在，因此并集构建下依然精确。本 crate 的
+//!   [`FullRt`] 与 [`current()`] 按 `demo-*` 分组取用它们。
+//!
+//! compio 侧还有一条更强的纪律：**声明了 `SPAWN_SEND` 位就是静态失败**。
+//! `abs_art-compio` 用 `CompioCaps_` 断言（`#[diagnostic::on_unimplemented]`）
+//! 把 `Runtime<CAPS>` 的**类型定义**卡在「不含 `SPAWN_SEND`」上，于是
+//! `Runtime::<{ CompioFull | SPAWN_SEND }>`（即 `63`）在**构造点**就报 E0277，
+//! 而不是拖到调用 `spawn` 时才说「没有这个方法」。原始错误原文见
+//! [`strict_mode_check`] 的 `compio_rejects_spawn_send_at_construction`。
+//!
+//! # 本 crate 据此把业务项分成三组
 //!
 //! - **共同子集**（两种后端都能编译）：[`BlockOnRt`] / [`DelayRt`] /
 //!   [`LocalRt`] / [`BlockingRt`] / [`FullRt`] 与它们对应的业务函数；
 //! - **tokio 组**（`#[cfg(feature = "demo-tokio")]`）：依赖 `TrSpawnSend` 的
-//!   [`CapRt`] / [`double_via_runtime`] / [`generic_two_tasks`]；
+//!   `CapRt` / `double_via_runtime` / `generic_two_tasks`（这三个只在 tokio 组存在，
+//!   故此处用代码体而非文档链接）；
 //! - **compio 组**（`#[cfg(feature = "demo-compio")]`）：没有 `TrSpawnSend`
 //!   时的替代路径 `local_three_tasks`——改用本地作用域投递。
 //!
@@ -69,15 +97,17 @@
 //! - `cap_block_on.rs`：`BLOCK_ON` —— 最小能力 + `TrBlockOn` 放松 `'static`
 //!   后可以驱动借用栈数据的 future / 返回借用引用；
 //! - `cap_spawn_send.rs`：`BLOCK_ON | SPAWN_SEND` —— tokio 侧是真正的跨线程
-//!   投递；**compio 侧是反向演示**：它没有跨线程全局队列、不实现
-//!   `TrSpawnSend`，示范改用本地作用域投递；
+//!   投递；**compio 侧是反向演示**：它没有跨线程全局队列，声明 `SPAWN_SEND`
+//!   位即静态失败（E0277），示范改用本地作用域投递；
 //! - `cap_spawn_local.rs`：本地投递 —— `rt.local_scope()` 取得作用域，
 //!   `scope.spawn_local(..)` 投递 `!Send` 任务，`scope.run_until(..)` /
 //!   `scope.block_on(..)` 驱动队列；
-//! - `cap_delay.rs`：`DELAY` —— 时间驱动与 time driver 前提；
+//! - `cap_delay.rs`：`DELAY | CLOCK` —— 时间驱动与 time driver 前提；
+//!   两后端都演示 `now()`，因此都必须写 `CLOCK`；
 //! - `cap_spawn_blocking.rs`：`BLOCK_ON | SPAWN_BLOCKING` —— 阻塞线程池与
 //!   异步侧共存；
-//! - `cap_full.rs`：`FULL` —— 五个能力位（含 `SPAWN_LOCAL` 声明位）+ 两件套
+//! - `cap_full.rs`：**本后端的**完整能力集（`TokioFull` = `63` /
+//!   `CompioFull` = `59`）——六个能力位（含 `SPAWN_LOCAL` 声明位）+ 两件套
 //!   协同 + 后端自省（`rt.tag()` / `rt.about()`）；
 //! - `cap_zero.rs`：`0` —— 零能力边界：`Runtime<0>` 只是值类型，任何能力调用
 //!   都是编译错误。
@@ -115,8 +145,12 @@ compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（
 ///
 /// 注意 [`TrLocalScope`] 在这里是**作用域**的契约：它的宿主是
 /// `Runtime::local_scope()` 交出的 `LocalScope` 值，不是运行时值本身。
+///
+/// [`FULL`] 是**裸名**（= 默认后端的完整能力集），保留它是为了说明差异：
+/// 全能力别名请用 [`FullCaps`] / [`FullRt`]，它们按 `demo-*` 分组取用
+/// `TokioFull` / `CompioFull`。
 pub use abs_art_bridge::{
-    BLOCK_ON, DELAY, FULL, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
+    BLOCK_ON, CLOCK, DELAY, FULL, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
     TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend, TrTime,
 };
@@ -142,23 +176,35 @@ pub use abs_art_bridge::{
     CompioRuntime as Runtime,
 };
 
+/// 当前分组的**完整能力集**（按 `demo-*` 分组取具名常量）。
+///
+/// - `demo-tokio` → [`TokioFull`](abs_art_bridge::TokioFull) = `63`（含 `SPAWN_SEND`）；
+/// - `demo-compio` → [`CompioFull`](abs_art_bridge::CompioFull) = `59`（**不含**
+///   `SPAWN_SEND`：compio 没有跨线程全局工作队列，声明该位即静态失败）。
+///
+/// 刻意**不**用裸名 [`FULL`]：那是**默认后端**的完整能力集。workspace 的 feature
+/// 并集下默认后端是 compio，裸 `FULL == 59`，拿它写 tokio 组的「全能力」会
+/// **静默少一位**（`rt.spawn(..)` 不可用）。具名常量随各自后端的 feature 存在，
+/// 因此在并集构建下也精确。
+#[cfg(feature = "demo-tokio")]
+pub use abs_art_bridge::TokioFull as FullCaps;
+
+/// 当前分组的**完整能力集**（compio 版，见 tokio 分支的说明）。
+#[cfg(feature = "demo-compio")]
+pub use abs_art_bridge::CompioFull as FullCaps;
+
 /// 用**当前分组**的运行时上下文构造全能力运行时值。
 ///
-/// 等价于 `Runtime::<{ FULL }>::current()`；单独给出是为了让示例与 doctest 不必写
-/// 类型参数（`Runtime::current()` 写在表达式位置会 `E0284`）。
+/// 等价于 `Runtime::<{ FullCaps }>::current()`（即 tokio 组的
+/// `Runtime::<{ TokioFull }>` / compio 组的 `Runtime::<{ CompioFull }>`）；单独
+/// 给出是为了让示例与 doctest 不必写类型参数（`Runtime::current()` 写在表达式
+/// 位置会 `E0284`）。
 ///
 /// # Panics
 ///
 /// 不在当前分组的运行时上下文内时 panic（与后端 `current()` 的前提一致）。
-#[cfg(feature = "demo-tokio")]
-pub fn current() -> Runtime<{ FULL }> {
-    Runtime::<{ FULL }>::current()
-}
-
-/// 用**当前分组**的运行时上下文构造全能力运行时值（compio 版）。
-#[cfg(feature = "demo-compio")]
-pub fn current() -> Runtime<{ FULL }> {
-    Runtime::<{ FULL }>::current()
+pub fn current() -> Runtime<{ FullCaps }> {
+    Runtime::<{ FullCaps }>::current()
 }
 
 // =====================================================================
@@ -173,12 +219,17 @@ pub fn current() -> Runtime<{ FULL }> {
 /// 的 future）。
 pub type BlockOnRt = Runtime<{ BLOCK_ON }>;
 
-/// 计时与时刻的能力声明：只需要 `DELAY` 一位。
+/// 计时与时刻的能力声明：`DELAY | CLOCK`（**两位**）。
 ///
-/// 抽象层里 `TrTime: TrDelay + TrClock`，而三者共用 `DELAY` 这一位，因此写
-/// `DELAY` 就能同时用上 `delay` / `now` / `timeout`（`interval` 同样由这一位
-/// 门控，只是本 crate 未从 bridge 再导出 `TrInterval`，故示例只用前三者）。
-pub type DelayRt = Runtime<{ DELAY }>;
+/// `CLOCK`（`1 << 5`，见 [`CLOCK`]）是「读时刻」的独立能力位：各后端的
+/// `impl TrClock` 要求 `[(); CAPS]: HasClock`，而 `TrTime: TrDelay + TrClock`，
+/// 因此 `now()` 与 `timeout(..)` / `interval(..)` **都要这一位**。
+///
+/// 只写 `DELAY` 时 `delay` 仍然可用，但 `rt.now()` 会被编译期拒绝（trait bound
+/// 不满足）——本别名从 `{ DELAY }` 改成 `{ DELAY | CLOCK }` 正是为此。
+/// `interval` 同样由这两个位门控，只是本 crate 未从 bridge 再导出 `TrInterval`，
+/// 故示例只用 `delay` / `now` / `timeout` 三者。
+pub type DelayRt = Runtime<{ DELAY | CLOCK }>;
 
 /// 本地投递的能力声明：`BLOCK_ON | DELAY | SPAWN_LOCAL`。
 ///
@@ -194,12 +245,28 @@ pub type LocalRt = Runtime<{ BLOCK_ON | DELAY | SPAWN_LOCAL }>;
 /// 阻塞池的能力声明：`BLOCK_ON | SPAWN_BLOCKING`。
 pub type BlockingRt = Runtime<{ BLOCK_ON | SPAWN_BLOCKING }>;
 
-/// 全能力声明：也可以直接写 `Runtime`，默认参数就是 [`FULL`]。
+/// 全能力声明（**tokio 组**）：`Runtime<{ TokioFull }>`（`63`）。
 ///
-/// 在 compio 组里这一个值仍然**不**实现 `TrSpawnSend`（后端事实），因此
-/// 「FULL 值可以调 `spawn`」只在 tokio 组成立——这正是后端差异必须写进文档、
-/// 而不能被 `FULL` 这个名字掩盖的地方。
-pub type FullRt = Runtime<{ FULL }>;
+/// 这里必须写**具名**的 `TokioFull`（经 [`FullCaps`] 解析），不能用裸名
+/// [`FULL`]：裸 `FULL` 是**默认后端**的完整能力集，在 workspace 的 feature 并集
+/// 构建下等于 compio 的 `59`，会让 tokio 组静默少一位 `SPAWN_SEND`
+/// （`rt.spawn(..)` 直接不可用）。`TokioFull` 只要 tokio 后端的 feature 开启就
+/// 存在，因此在并集构建下也精确。
+#[cfg(feature = "demo-tokio")]
+pub type FullRt = Runtime<{ abs_art_bridge::TokioFull }>;
+
+/// 全能力声明（**compio 组**）：`Runtime<{ CompioFull }>`（`59`）。
+///
+/// `CompioFull` **不含** `SPAWN_SEND`：compio 没有跨线程全局队列，它兑现不了那
+/// 一位。这也是本组的 `FullRt` 能通过编译的原因——若把它写成
+/// `Runtime::<{ CompioFull | SPAWN_SEND }>`（数值上等于 `abs_art::FULL`，`63`），
+/// 失败发生在**构造点**：`CompioCaps_` 静态断言给出 E0277
+/// （见 [`strict_mode_check::compio_rejects_spawn_send_at_construction`]）。
+///
+/// 因此「全能力值可以调 `spawn`」只在 tokio 组成立，且这一点由**具名常量**而不是
+/// `FULL` 这个名字表达。
+#[cfg(feature = "demo-compio")]
+pub type FullRt = Runtime<{ abs_art_bridge::CompioFull }>;
 
 /// 共同子集示例业务函数：在这个运行时值上 `block_on` 一个**借用栈上数据**的
 /// future（非 `'static`）。
@@ -784,8 +851,10 @@ mod tests_compio {
 /// 2. **作用域门控**：`local_scope()` 是取得本地投递能力的**唯一入口**，它要求
 ///    `CAPS` 含 `SPAWN_LOCAL`——所以「没写下来 → 连作用域都拿不到 → 更没有
 ///    `spawn_local` 可调」；
-/// 3. **后端事实**（本轮新增）：compio 的运行时值**不实现** `TrSpawnSend`——这与
-///    能力位无关，是「compio 没有跨线程全局工作队列」这条事实的类型级表达。
+/// 3. **后端静态断言**（本轮更新）：compio 的 `Runtime<CAPS>` 在**类型定义**上要求
+///    `[(); CAPS]: CompioCaps_`，即 `CAPS` **不得含 `SPAWN_SEND` 位**。声明了就在
+///    **构造点**报 E0277（`#[diagnostic::on_unimplemented]` 的人话文案），而不是
+///    拖到调用 `spawn` 时才以「没有这个方法」的形式暴露。
 ///
 /// 另外有一条刻意**不是** `compile_fail` 的用例（`no_context_construction`）：
 /// 没有上下文时构造运行时值是**运行期**失败，不是编译期失败。
@@ -923,17 +992,40 @@ pub mod strict_mode_check {
     /// ```
     pub mod spawn_local_not_on_runtime_value {}
 
-    /// (g) **新增精度**：compio 的运行时值**不实现** `TrSpawnSend`。
+    /// (g) **静态失败**：compio 上声明 `SPAWN_SEND` 位 → **构造点**即编译错误
+    /// （E0277），而不是等到调用 `spawn`。
     ///
-    /// **验证什么**：把「compio 没有跨线程全局工作队列」这条**后端事实**钉在
-    /// 类型层面。即便把全部能力位都写上（`FULL` 含 `SPAWN_SEND` 位），compio 的
-    /// 运行时值依然没有 `spawn` 可调——能力位只表达「业务侧声明要什么」，而
-    /// 「这个后端能不能给」由后端自己决定。
+    /// **验证什么**：把「compio 没有跨线程全局工作队列」这条**后端事实**提前到
+    /// 「值被使用」这一刻。`abs_art-compio` 把静态断言写在 `Runtime` 的**类型定义**
+    /// 上（`where [(); CAPS]: CompioCaps_`），因此 `CAPS` 含 `SPAWN_SEND` 位时连值
+    /// 都构造不出来：`Runtime::<{ CompioFull | SPAWN_SEND }>`（数值 `63`，等于
+    /// `abs_art::FULL`）在**构造调用**处就失败。
     ///
-    /// **为什么必须失败**：compio 的 `spawn` 投递到**本线程**运行时的执行器
-    /// （其 `Runtime` 内部全是 `Rc`，`!Send`），不存在可以被多个线程共享的全局
-    /// 工作队列。因此 `abs_art-compio` **不**为 `Runtime<CAPS>` 实现
-    /// `TrSpawnSend`，调用点得到 E0599。
+    /// **为什么必须失败**：`CompioCaps_` 只对 `0..=63` 中**不含** `SPAWN_SEND` 位的
+    /// 32 个掩码实现（compio 的完整能力集 [`crate::FullCaps`] 是 `59`，不含该位）。
+    /// 注意：用裸名 `Runtime::<{ FULL }>` 在 compio 组**不会**报错——裸 `FULL` 是
+    /// 默认后端的完整能力集，compio 下它就是 `59`；要演示负例必须用「具名全能力集
+    /// **显式或上** `SPAWN_SEND`」。
+    ///
+    /// **原始错误原文**（`cargo check -p abs_art-demo` 实测，取首条 `E0277`）：
+    ///
+    /// ```text
+    /// error[E0277]: compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力
+    ///    --> abs_art-demo/examples/_probe_compio_static_fail.rs:9:22
+    ///     |
+    ///   9 |         let _value = Runtime::<{ CompioFull | SPAWN_SEND }>::current();
+    ///     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 请从 CAPS 中去掉 `abs_art::SPAWN_SEND`；compio 的完整能力集是 `abs_art_compio::FULL`
+    ///     |
+    ///     = help: the trait `abs_art_compio::caps::CompioCaps_` is not implemented for `[(); 63]`
+    ///     = note: compio 的执行器是线程本地的：`Runtime::spawn` 投的是本线程运行时的队列。要投递任务请用 `Runtime::local_scope()` 的 `spawn_local`。
+    ///     = note: 本断言只对 `0..=63` 中不含 `SPAWN_SEND` 位的 32 个掩码成立；若 CAPS 里还有 `0..=63` 之外的位置位，同样会看到这条信息。
+    /// note: required by a bound in `CompioRuntime`
+    ///    --> abs_art-compio/src/lib.rs:277:17
+    /// ```
+    ///
+    /// 随后还有一条**次生**错误（`E0599`，指出 `CompioRuntime<63>` 上
+    /// `current` 的 trait bounds 不满足）——人话信息来自前一条 `E0277`，这也正是
+    /// 断言必须写在类型定义而非仅固有 impl 上的原因。
     ///
     /// **正确的替代**：改用本地作用域投递——
     /// `let scope = rt.local_scope(); scope.spawn_local(..)`（见
@@ -941,15 +1033,14 @@ pub mod strict_mode_check {
     /// [`crate::local_three_tasks`]）。代价要一并记住：本地任务在**本线程**上
     /// 交错执行，没有跨线程并行。
     ///
-    /// ```compile_fail,E0599
-    /// use abs_art_demo::{FULL, Runtime, TrSpawnSend};
+    /// ```compile_fail,E0277
+    /// use abs_art_demo::{FullCaps, Runtime, SPAWN_SEND};
     ///
-    /// // 即便写了 FULL（含 SPAWN_SEND 位），compio 的运行时值也不实现 TrSpawnSend
-    /// let rt = Runtime::<{ FULL }>::current();
-    /// let _ = rt.spawn(async { 1 });
+    /// // 声明了 SPAWN_SEND 位（59 | 4 == 63）：构造点即静态失败，而非调用 spawn 时
+    /// let _value = Runtime::<{ FullCaps | SPAWN_SEND }>::current();
     /// ```
     #[cfg(feature = "demo-compio")]
-    pub mod compio_runtime_has_no_spawn_send {}
+    pub mod compio_rejects_spawn_send_at_construction {}
 
     /// (h) 没有运行时上下文时构造运行时值（`current()`）——**不是**编译错误。
     ///

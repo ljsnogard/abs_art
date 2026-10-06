@@ -102,10 +102,28 @@ use core::fmt;
 use abs_art::RuntimeTag;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
+    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
     TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
     TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
 };
+
+/// 本后端的**完整能力集**。
+///
+/// tokio 有真正的跨线程全局工作队列（`spawn` 投到 `Handle` 的全局队列、
+/// `spawn_blocking` 投到阻塞线程池），五种能力一个不缺，因此本常量与
+/// [`abs_art::FULL`] **数值相同**。与之相对，`abs_art-compio` 的 `FULL` 不含
+/// `SPAWN_SEND`（它没有那种队列）——所以「完整」是**按后端**回答的问题，本常量是
+/// 本后端的答案。
+///
+/// 与 [`abs_art::FULL`] 的分工：
+///
+/// - [`abs_art::FULL`] 是**位集合意义上**的「全部能力位」（基础 crate 给出的全集）；
+/// - 本常量是**本后端实现得了的**那一部分。
+///
+/// 两者当前相等只是「tokio 每种能力都有」的结果，不是同义反复；某个后端补齐不了
+/// 某个位时，差异体现在各后端的 `FULL` 上。本 crate 的 [`Runtime`] 默认类型参数
+/// 用的就是本常量。
+pub const FULL: usize = abs_art::FULL;
 
 /// tokio 组合运行时**值**。
 ///
@@ -308,3 +326,43 @@ pub use local_scope::LocalScope;
 
 #[cfg(feature = "spawn_blocking")]
 mod spawn_blocking;
+
+#[cfg(test)]
+mod tests {
+    //! 针对 tokio 后端**完整能力集常量**的单元测试。
+
+    use abs_art::{
+        HasBlockOn, HasClock, HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend,
+    };
+
+    use crate::FULL;
+
+    /// 目的：验证本后端的 `FULL` 是**本后端的完整能力集**——数值与
+    /// [`abs_art::FULL`] 相同，且确实覆盖全部六种能力。
+    ///
+    /// 手段：运行期断言 `FULL == abs_art::FULL` 且 `FULL` 含 `CLOCK`
+    /// （`FULL & CLOCK != 0`）；编译期把 `[(); FULL]` 依次传给六个标记 trait 的断言函数。
+    ///
+    /// 判定：断言成立且编译通过即为通过。tokio 有真正的跨线程全局工作队列与阻塞
+    /// 线程池，五种能力一个不缺，因此这里与基础 crate 的全集相等；若将来某位不再
+    /// 支持，本用例会先失败，迫使各后端 `FULL` 与文档同步。
+    #[test]
+    fn full_is_this_backend_complete_capability_set() {
+        fn assert_block_on<T: HasBlockOn>() {}
+        fn assert_delay<T: HasDelay>() {}
+        fn assert_spawn_send<T: HasSpawnSend>() {}
+        fn assert_spawn_local<T: HasSpawnLocal>() {}
+        fn assert_spawn_blocking<T: HasSpawnBlocking>() {}
+        fn assert_clock<T: HasClock>() {}
+
+        assert_eq!(FULL, abs_art::FULL, "tokio 的完整能力集应与基础 crate 的全集同值");
+        assert_ne!(FULL & abs_art::CLOCK, 0, "本后端的完整能力集必须含 CLOCK");
+
+        assert_block_on::<[(); FULL]>();
+        assert_delay::<[(); FULL]>();
+        assert_spawn_send::<[(); FULL]>();
+        assert_spawn_local::<[(); FULL]>();
+        assert_spawn_blocking::<[(); FULL]>();
+        assert_clock::<[(); FULL]>();
+    }
+}

@@ -7,11 +7,12 @@
 
 use abs_art::{HasSpawnBlocking, TrSpawnBlocking};
 
-use crate::{Runtime, join_handle::JoinHandle};
+use crate::{CompioCaps_, Runtime, join_handle::JoinHandle};
 
 impl<const CAPS: usize> TrSpawnBlocking for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnBlocking,
+    [(); CAPS]: CompioCaps_,
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 

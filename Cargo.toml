@@ -7,6 +7,7 @@ members = [
     "abs_art-bridge",
     "abs_art-demo",
     "abs_art-smoke",
+    "abs_art-mock_clock",
 ]
 resolver = "3"
 
@@ -27,6 +28,7 @@ abs_art-tokio = { path = "abs_art-tokio" }
 abs_art-compio = { path = "abs_art-compio" }
 abs_art-smol = { path = "abs_art-smol" }
 abs_art-bridge = { path = "abs_art-bridge" }
+abs_art-mock_clock = { path = "abs_art-mock_clock" }
 # 与运行时无关的消息通道：abs_art-smoke 的循环任务用例使用
 async-channel = { version = "2" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }

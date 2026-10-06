@@ -8,11 +8,12 @@ use core::future::Future;
 
 use abs_art::{HasBlockOn, TrBlockOn};
 
-use crate::Runtime;
+use crate::{CompioCaps_, Runtime};
 
 impl<const CAPS: usize> TrBlockOn for Runtime<CAPS>
 where
     [(); CAPS]: HasBlockOn,
+    [(); CAPS]: CompioCaps_,
 {
     /// 用**本值抓住的** compio 运行时阻塞驱动 `future`。
     ///

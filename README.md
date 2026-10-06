@@ -140,13 +140,15 @@ abs_art            基础 crate：不依赖任何运行时
                     ├─ trait：TrLocalScope —— **线程独占**的本地作用域
                     │          （spawn_local / run_until / block_on；计时与时刻不在这里）
                     └─ caps：能力位掩码（BLOCK_ON / DELAY / SPAWN_SEND /
-                              SPAWN_LOCAL / SPAWN_BLOCKING）与类型级标记
-                              ※ 位负责「声明」，且真正门控调用点（见下）
+                              SPAWN_LOCAL / SPAWN_BLOCKING / CLOCK）与类型级标记
+                              ※ 位负责「声明」，且真正门控调用点；每个后端另有
+                                自己的 `FULL`（compio 的 FULL 不含 SPAWN_SEND）
 
 abs_art-tokio      tokio 后端：Runtime<const CAPS> = Handle（Send + Sync）；
                    LocalScope = Rc<LocalSet>（!Send，线程独占）
 abs_art-compio     compio 后端：Runtime 持 compio 运行时（本身线程绑定）；
-                   LocalScope 持同一份运行时；**不实现 TrSpawnSend**
+                   LocalScope 持同一份运行时；**声明 SPAWN_SEND 即静态失败**
+                   （自己的 FULL 不含该位）
 abs_art-smol       smol 后端：Runtime 是零大小标记（全局执行器进程级）；
                    LocalScope = Rc<LocalExecutor>
 
@@ -241,6 +243,52 @@ scope.block_on(async { .. });            // 阻塞驱动点（同时驱动队列
 `Rc<LocalSet>` 之后整个值就不能跨线程传了；而「可共享的把手」与「线程独占的队列」
 本就该分开（实测见 [local-scope-vs-runtime-20261006-1050.md](dev-notes/local-scope-vs-runtime-20261006-1050.md)）。
 
+### 虚拟时钟：测试自己推进时间
+
+tokio 的 `test-util` 能在 `start_paused` 下把 `sleep(1h)` 变成瞬间完成；compio / smol
+没有这个能力，于是「带虚拟时间的测试」只能写在 tokio 上。`abs_art-mock_clock` 把这项
+能力做成**与后端无关的一份实现**，三个后端各以**可选 feature** `mock-clock` 接入：
+
+```rust
+use abs_art_mock_clock::{ManualClock, ManualTime};
+
+let clock = ManualClock::new();
+let scope = abs_art_smol::current().local_scope();
+let value = ManualTime::new(abs_art_smol::current(), clock.clone());
+
+let started = std::time::Instant::now();
+scope.block_on_advancing(&clock, async {
+    value.delay(core::time::Duration::from_secs(3_600)).await; // 虚拟一小时
+    assert_eq!(value.now().as_millis(), 3_600_000);
+});
+assert!(started.elapsed() < core::time::Duration::from_secs(1)); // 真实时间几乎为零
+```
+
+推进参考 `tokio::time::advance` 做成 **future**（`rt.advance(d).await`）：推进不是纯状态写入，
+被唤醒的任务需要有机会被调度；冻结用 `pause()` / `resume()`。
+
+| 后端 | 驱动 | 「空闲」判据 |
+| --- | --- | --- |
+| smol | `smol::block_on(Supervisor)` | `LocalExecutor::try_tick()` |
+| compio | `Runtime::block_on(Supervisor)` | `Runtime::run()` |
+| tokio | `Handle::block_on(LocalSet::run_until(Supervisor))` | 不需要（`block_on` 自己驱动任务） |
+
+三点设计要点：
+
+1. **能力在 `abs_art`，实现在本 crate**：`TrClock` 定义「什么是时刻」，
+   **`TrMockClock: TrClock`** 定义「时刻可以被调用方推进」——它是 `TrClock` 的**特例**，
+   所以也在基础 crate 里（业务代码只约束 `TrClock`，测试代码才约束 `TrMockClock`）。
+   手动时钟状态、到期唤醒表、delay 与驱动才是本 crate 的实现；扩展点
+   （`ManualClockApi` / `MockInstant` / 驱动闭包）也都在这里。
+2. **装饰器而非改造后端**：`ManualTime<R>` 只把 `TrDelay` / `TrClock` / `TrTime` 换成手动
+   时钟，其余能力（`spawn` / `spawn_blocking` / `block_on` / 身份）原样委托给 `R`——
+   因此「时刻与计时器同源」天然成立，而本地队列仍从 `inner()` 上取。
+3. **静默挂起变响亮失败**：驱动在「既没有就绪任务、也没有可推进的定时器」时 panic，
+   而不是让测试永远挂着。
+
+**注意**：`mock-clock` 不在任何后端的默认 features 里；`just test-mock-clock` 会把它在
+四个 crate 上跑一遍。
+
 ### 两种用法对照
 
 | 场景 | 写法 | 后端如何决定 |
@@ -264,6 +312,7 @@ scope.block_on(async { .. });            // 阻塞驱动点（同时驱动队列
 ```sh
 cargo test --workspace        # 全部 crate 的测试
 cargo run -p abs_art-demo     # 运行演示（默认 compio 后端；tokio 组见下）
+just test-mock-clock          # 虚拟时钟：本 crate + 三后端开 `mock-clock` 各跑一遍
 just demo                     # 跑 abs_art-demo 两组 cap smoke tests（tokio + compio）
 just smoke                    # 跑跨后端 spawn_local 行为契约矩阵（见下）
 ```

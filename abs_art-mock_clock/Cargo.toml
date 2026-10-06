@@ -1,0 +1,16 @@
+[package]
+name = "abs_art-mock_clock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Manually driven (virtual) clock for abs_art runtimes: no_std-free testing time"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+abs_art = { path = "../abs_art", version = "0.3.0" }
+
+[features]
+default = []

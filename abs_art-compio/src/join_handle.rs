@@ -9,7 +9,7 @@ use core::{
 
 use abs_art::{TrAsyncRuntime, runtime::TrJoinHandle};
 
-use crate::Runtime;
+use crate::{CompioCaps_, Runtime};
 
 /// 包装 `compio::runtime::JoinHandle<T>`；await 它以获取 `Result<T, JoinError>`。
 pub struct JoinHandle<T> {
@@ -19,7 +19,13 @@ pub struct JoinHandle<T> {
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 ///
 /// `about` 收 `&self`（值化后的形状）：身份由运行时值报告，而不是由类型报告。
-impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
+/// [`TrAsyncRuntime`] 也是能力 trait，因此同样加上
+/// [`CompioCaps_`] 门控：泛型代码里写 `R: TrAsyncRuntime`、实参写成
+/// `Runtime<{SPAWN_SEND}>` 时会在这里报同一条人话错误，而不是拖到调用点。
+impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS>
+where
+    [(); CAPS]: CompioCaps_,
+{
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
     fn about(&self) -> abs_art::RuntimeTag {

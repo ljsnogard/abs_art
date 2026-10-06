@@ -5,7 +5,7 @@
 //! - `block_on`：阻塞等待一个 future 完成；
 //! - `delay`：睡眠 / 延迟执行，以及计时能力（[`TrClock`] / [`TrTime`]）；
 //! - `spawn_send`：**本后端不提供**该能力——该 feature 只带来一篇「为什么 compio 不实现
-//!   `TrSpawnSend`」的说明（见 `spawn_send` 模块）；
+//!   `TrSpawnSend`、以及声明了该位之后会怎样静态失败」的说明（见 `spawn_send` 模块）；
 //! - `local_scope`：线程独占的本地作用域（`!Send` 任务 + 投递与统一驱动入口）；
 //! - `spawn_blocking`：投递阻塞函数到阻塞线程池。
 //!
@@ -25,8 +25,15 @@
 //! - 反过来，库侧写 `R: TrSpawnSend` 是在声明「我依赖一条可跨线程共享的队列」，而
 //!   compio 上这个前提不存在，承载它的运行时值本身还是 `!Send` 的，接手方搬都搬不走。
 //!
-//! 因此本 crate **删掉了那个 impl**，只留下 `spawn_send` 模块记录这条因果，并用
-//! `compile_fail` 文档测试钉住「[`Runtime`] 不实现 [`TrSpawnSend`]」。
+//! 因此本 crate **删掉了那个 impl**，并把「声明了 `SPAWN_SEND`」做成**静态失败**：
+//!
+//! - 本 crate 的 [`FULL`]（[`Runtime`] 的默认 `CAPS`）是 [`abs_art::FULL`] **去掉
+//!   `SPAWN_SEND` 位**的结果（`59`）；
+//! - 任何含 `SPAWN_SEND` 位的 `Runtime<CAPS>` **值**，一被使用（构造 / 调能力方法 /
+//!   当作泛型实参）就编译失败，错误信息是人话：
+//!   ``compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力``。
+//!
+//! 断言 trait 是 [`CompioCaps_`]，因果与错误原文见 [`caps`] 与 `spawn_send` 模块。
 //!
 //! # 要投递任务，请用本地作用域的 [`TrLocalScope::spawn_local`]
 //!
@@ -35,8 +42,8 @@
 //! `Runtime::local_scope()`：
 //!
 //! ```
-//! use abs_art::{FULL, TrLocalScope};
-//! use abs_art_compio::Runtime;
+//! use abs_art::TrLocalScope;
+//! use abs_art_compio::{FULL, Runtime};
 //!
 //! let rt = compio::runtime::Runtime::new().unwrap();
 //! let out = rt.block_on(async {
@@ -148,8 +155,20 @@
 //! });
 //! ```
 //!
-//! compio 的运行时值不实现 [`TrSpawnSend`]，因此**任何** CAPS 下都没有 `spawn` 方法
-//! 可用——原因与替代写法见上文专节与 `spawn_send` 模块。
+//! compio 的运行时值不实现 [`TrSpawnSend`]，而且**声明了 `SPAWN_SEND` 位的掩码根本
+//! 交不出可用的运行时值**：`Runtime::<{ abs_art::FULL }>::current()` 会在构造点以
+//! ``E0277: compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力`` 拒绝编译。
+//! 原因与替代写法见上文专节、[`caps`] 与 `spawn_send` 模块。
+//!
+//! ```compile_fail
+//! use abs_art_compio::Runtime;
+//!
+//! // `abs_art::FULL == 63` 含 `SPAWN_SEND` 位（bit2）→ 编译失败（E0277，人话信息）
+//! let rt = compio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async {
+//!     let _value = Runtime::<{ abs_art::FULL }>::current();
+//! });
+//! ```
 //!
 //! ## 本地投递（`!Send` 任务）
 //!
@@ -204,10 +223,13 @@ use core::fmt;
 use abs_art::RuntimeTag;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, FULL, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
+    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
     TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
     TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
 };
+
+pub mod caps;
+pub use caps::{CompioCaps_, FULL};
 
 /// compio 组合运行时**值**。
 ///
@@ -216,13 +238,25 @@ pub use abs_art::{
 /// **这个值**抓住的那份运行时上；本地投递则经 `Runtime::local_scope()` 交出
 /// `LocalScope`（同一份运行时的把手）。
 ///
-/// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认 [`FULL`]（全功能），
-/// 也可以写成 `Runtime<{ BLOCK_ON | SPAWN_LOCAL }>` 只声明部分能力。掩码决定这个
+/// 类型参数 `CAPS` 是能力位掩码（见 [`abs_art::caps`]）：默认取本 crate 的 [`FULL`]
+/// ——「compio 兑现得了的全部能力」，**不含** `SPAWN_SEND`；也可以写成
+/// `Runtime<{ BLOCK_ON | SPAWN_LOCAL }>` 只声明部分能力。掩码决定这个
 /// **类型**实现了哪些能力 trait（以及能否经 `local_scope()` 取得作用域），从而决定
 /// 哪些方法可调。
 ///
-/// 注意：本值**不**实现 [`TrSpawnSend`]——compio 没有跨线程全局队列，投递任务请用
-/// [`TrLocalScope::spawn_local`]（理由见 crate 文档）。
+/// # 含 `SPAWN_SEND` 的掩码是静态失败
+///
+/// 掩码里只要含 `SPAWN_SEND` 位（例如 [`abs_art::FULL`] 就是 `63`，bit2 置位），它就
+/// 过不了 [`CompioCaps_`] 断言——这条断言写在**类型定义**（`where [(); CAPS]:
+/// CompioCaps_`）上，而不是只写在 impl 上：只有这样才能让
+/// `Runtime::<{ abs_art::FULL }>::current()` 收到 `E0277` 与
+/// ``compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力`` 这条人话信息
+/// （实测：断言只挂 impl 时 rustc 只给 `E0599: … but its trait bounds were not
+/// satisfied`，看不到 `#[diagnostic::on_unimplemented]` 的文案）。因果与错误原文见
+/// [`caps`] 与 [`spawn_send`] 模块。
+///
+/// 注意：本值**不**实现 [`TrSpawnSend`]（compio 没有跨线程全局队列），且**声明该位的
+/// 值根本构造不出来**——投递任务请用 [`TrLocalScope::spawn_local`]。
 ///
 /// # 构造
 ///
@@ -238,12 +272,16 @@ pub use abs_art::{
 ///
 /// 本值与 `compio::runtime::Runtime` 一样是 `!Send`：compio 的运行时是线程本地的，
 /// 队列与驱动都绑在创建它的线程上。这不是本 crate 附加的限制。
-pub struct Runtime<const CAPS: usize = FULL> {
+pub struct Runtime<const CAPS: usize = FULL>
+where
+    [(); CAPS]: CompioCaps_,
+{
     /// 构造点抓住的 compio 运行时：`spawn_blocking` / `local_scope` / `block_on` 都打在它上面。
     rt_: compio::runtime::Runtime,
 }
 
-/// 用当前 compio 运行时上下文构造**全能力**（`Runtime<FULL>`）运行时值。
+/// 用当前 compio 运行时上下文构造**本后端完整能力集**（`Runtime<FULL>`，不含
+/// `SPAWN_SEND`）的运行时值。
 ///
 /// 这是最常用的构造入口：类型参数 `CAPS` 直接取默认值 [`FULL`]，因此在表达式
 /// 位置也**不需要类型标注**。需要显式声明能力时用
@@ -265,7 +303,10 @@ pub fn current() -> Runtime {
     Runtime::current()
 }
 
-impl<const CAPS: usize> Runtime<CAPS> {
+impl<const CAPS: usize> Runtime<CAPS>
+where
+    [(); CAPS]: CompioCaps_,
+{
     /// 用当前 compio 运行时上下文构造运行时值。
     ///
     /// # 表达式位置请用 turbofish 或 crate 级自由函数
@@ -273,7 +314,7 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// `CAPS` 的默认值 `FULL` **不参与**函数调用返回位置的推断：实测
     /// `let value = Runtime::current();`（无标注）会报
     /// `E0284: type annotations needed for Runtime<_>`。因此表达式位置有两条出口：
-    /// 写全 `Runtime::<{ abs_art::FULL }>::current()`，或用 crate 级自由函数
+    /// 写全 `Runtime::<{ FULL }>::current()`（或任意显式掩码），或用 crate 级自由函数
     /// [`current()`](crate::current)（返回类型已是具体的 `Runtime<FULL>`）。
     ///
     /// ```compile_fail
@@ -292,13 +333,19 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// 调用点不在 compio 运行时上下文内时 panic。需要在上下文之外构造时，用
     /// [`Runtime::with_runtime`]。
     ///
+    /// # 含 `SPAWN_SEND` 的掩码在此处就被拒
+    ///
+    /// `CAPS` 含 `SPAWN_SEND` 位时（例如 `Runtime::<{ abs_art::FULL }>::current()`），
+    /// 本函数因 [`CompioCaps_`] 不成立而**编译失败**，报
+    /// ``E0277: compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力``。
+    ///
     /// # Examples
     ///
     /// ```
-    /// use abs_art_compio::Runtime;
+    /// use abs_art_compio::{FULL, Runtime};
     ///
     /// let rt = compio::runtime::Runtime::new().unwrap();
-    /// let value = rt.block_on(async { Runtime::<{ abs_art::FULL }>::current() });
+    /// let value = rt.block_on(async { Runtime::<{ FULL }>::current() });
     /// assert_eq!(value.tag(), abs_art::RuntimeTag::Compio);
     /// ```
     pub fn current() -> Self {
@@ -316,11 +363,11 @@ impl<const CAPS: usize> Runtime<CAPS> {
     ///
     /// ```
     /// use abs_art::TrBlockOn;
-    /// use abs_art_compio::Runtime;
+    /// use abs_art_compio::{FULL, Runtime};
     ///
     /// let rt = compio::runtime::Runtime::new().unwrap();
     /// // 此刻并不在 compio 上下文内；把句柄搬成运行时值
-    /// let value = Runtime::<{ abs_art::FULL }>::with_runtime(rt.clone());
+    /// let value = Runtime::<{ FULL }>::with_runtime(rt.clone());
     /// let out = value.block_on(async { 7u8 });
     /// assert_eq!(out, 7);
     /// ```
@@ -332,18 +379,27 @@ impl<const CAPS: usize> Runtime<CAPS> {
     ///
     /// 与 `Clone` 等价，但可以在 CAPS 上「换标签」（见 [`Runtime::retag`]）。
     ///
+    /// 目标标签 `OTHER` 同样要过 [`CompioCaps_`] 断言：`Runtime` 值不能借换标签
+    /// 「漂白」出一个含 `SPAWN_SEND` 的掩码（那会在本方法处就报
+    /// ``E0277: compio 后端没有 `SPAWN_SEND`（跨线程全局工作队列）能力``，而不是拖到
+    /// 使用点）。
+    ///
     /// # Examples
     ///
     /// ```
-    /// use abs_art::TrBlockOn;
-    /// use abs_art_compio::Runtime;
+    /// use abs_art::{BLOCK_ON, SPAWN_LOCAL, TrBlockOn};
+    /// use abs_art_compio::{FULL, Runtime};
     ///
     /// let rt = compio::runtime::Runtime::new().unwrap();
-    /// let value = rt.block_on(async { Runtime::<{ abs_art::FULL }>::current() });
-    /// let other = value.retag::<{ abs_art::FULL }>();
+    /// let value = rt.block_on(async { Runtime::<{ FULL }>::current() });
+    /// // 换标签：收窄成「只要 block_on + spawn_local」
+    /// let other = value.retag::<{ BLOCK_ON | SPAWN_LOCAL }>();
     /// assert_eq!(other.block_on(async { 1 }), 1);
     /// ```
-    pub fn retag<const OTHER: usize>(&self) -> Runtime<OTHER> {
+    pub fn retag<const OTHER: usize>(&self) -> Runtime<OTHER>
+    where
+        [(); OTHER]: CompioCaps_,
+    {
         Runtime {
             rt_: self.rt_.clone(),
         }
@@ -381,6 +437,7 @@ impl<const CAPS: usize> Runtime<CAPS> {
 impl<const CAPS: usize> Runtime<CAPS>
 where
     [(); CAPS]: abs_art::HasSpawnLocal,
+    [(); CAPS]: CompioCaps_,
 {
     /// 交出本运行时的本地作用域——一个**线程独占**的 [`LocalScope`]。
     ///
@@ -421,13 +478,23 @@ where
     }
 }
 
-impl<const CAPS: usize> Clone for Runtime<CAPS> {
+/// `Clone` 走的就是 [`Runtime::retag`]，因此它同样受 [`CompioCaps_`] 门控：含
+/// `SPAWN_SEND` 位的掩码既构造不出来，也克隆不出来。
+impl<const CAPS: usize> Clone for Runtime<CAPS>
+where
+    [(); CAPS]: CompioCaps_,
+{
     fn clone(&self) -> Self {
         self.retag()
     }
 }
 
-impl<const CAPS: usize> fmt::Debug for Runtime<CAPS> {
+/// `Debug` 也必须重复 [`CompioCaps_`]（[`Runtime`] 的 where 子句要求所有 impl 都能
+/// 满足它）；它本身不做任何能力调用，因此这里纯粹是类型层面的跟随，不改变门控语义。
+impl<const CAPS: usize> fmt::Debug for Runtime<CAPS>
+where
+    [(); CAPS]: CompioCaps_,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("abs_art_compio::Runtime")
             .field("caps", &CAPS)

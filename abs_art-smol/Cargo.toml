@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+abs_art-mock_clock = { workspace = true, optional = true }
 abs_art = { path = "../abs_art", version = "0.3.0" }
 smol = { workspace = true }
 
@@ -24,6 +25,10 @@ spawn_send = ["join_handle"]
 # 本版取代原来的类型级 `spawn_local` 能力位。
 local_scope = ["join_handle"]
 spawn_blocking = ["join_handle"]
+
+# 手动（虚拟）时钟驱动：接上独立的 `abs_art-mock_clock` crate。
+# 提供 `LocalScope::block_on_advancing`：本地队列照常被驱动，而「时间」由测试自己推进。
+mock-clock = ["dep:abs_art-mock_clock", "local_scope"]
 
 # 内部支持 feature：`JoinHandle` / `JoinError` 包装，被 `delay` 与 `spawn_*` 隐式启用
 join_handle = []

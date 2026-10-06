@@ -12,6 +12,49 @@
 //!
 //! 与 `delay` 共用 `delay` feature：两者要的是同一个运行时 feature（tokio 的
 //! `time`），没有拆开的必要。
+//!
+//! # 能力位：读时刻要 `CLOCK`，周期与超时要 `DELAY + CLOCK`
+//!
+//! [`TrClock`] 门控在 [`CLOCK`](abs_art::CLOCK) 上（`delay` 只要求
+//! [`DELAY`](abs_art::DELAY)）：**能等**与**能读表现在几点**是两件事，读时刻不需要
+//! 时间驱动跑起来。
+//!
+//! [`TrTime`]（`interval` / `timeout`）门控在 `DELAY` **与** `CLOCK` 两者上——这不是
+//! 随手加的一条，而是「同源」那条结构约束的直接后果：`TrTime: TrDelay + TrClock`
+//! 要求有周期源的值必然也能报时刻，所以**要 `interval` / `timeout` 就得同时声明
+//! `CLOCK`**。只声明 `DELAY` 时 `delay` 仍然可用，而 `now()` 不可用。
+//!
+//! 下面一对文档测试（一负一正）钉住这条门控：
+//!
+//! - **目的**：只声明 `DELAY` 时 `now()` 不可用；声明 `DELAY | CLOCK` 时 `now()` 与
+//!   `interval` 都可用。
+//! - **手段**：负例在 `Runtime<{ DELAY }>` 上调用 `now()` 并标为 `compile_fail`；
+//!   正例在 `Runtime<{ DELAY | CLOCK }>` 上调用同一方法，再取一个周期源。
+//! - **判断**：负例编译失败、正例编译并运行成功，两者**同时**成立才算门控被正确钉住
+//!   ——正例还排除了「负例因别的原因失败」这种假通过。
+//!
+//! ```compile_fail
+//! use abs_art::DELAY;
+//! use abs_art_tokio::Runtime;
+//!
+//! // 只有 `DELAY`：`Runtime<{ DELAY }>` 没有实现 `TrClock`
+//! let rt = Runtime::<{ DELAY }>::current();
+//! let _ = rt.now(); // 编译失败：当前类型上找不到 `now`
+//! ```
+//!
+//! 正例（两个位都声明，两者都可用）：
+//!
+//! ```
+//! use abs_art::{CLOCK, DELAY, TrClock, TrTime};
+//! use abs_art_tokio::Runtime;
+//!
+//! let rt = tokio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async {
+//!     let value = Runtime::<{ DELAY | CLOCK }>::current();
+//!     let _ = value.now(); // CLOCK → `TrClock` 可用
+//!     let _ = value.interval(core::time::Duration::from_secs(60)); // DELAY | CLOCK → `TrTime` 可用
+//! });
+//! ```
 
 use core::{
     future::Future,
@@ -20,7 +63,7 @@ use core::{
     time::Duration,
 };
 
-use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
+use abs_art::{HasClock, HasDelay, TrClock, TrInterval, TrTime};
 use tokio::time::MissedTickBehavior;
 
 use crate::Runtime;
@@ -58,7 +101,7 @@ impl TrInterval for Interval {
 
 impl<const CAPS: usize> TrClock for Runtime<CAPS>
 where
-    [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
 {
     /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：tokio 的时间驱动。
     ///
@@ -74,6 +117,7 @@ where
 impl<const CAPS: usize> TrTime for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
 {
     type Interval = Interval;
 

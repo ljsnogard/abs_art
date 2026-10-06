@@ -27,12 +27,75 @@
 //! `std::time::Instant` 满足 `TrClock::Instant` 的四个结构约束
 //! （`Copy + Ord`、`Add<Duration, Output = Instant>`、`Sub<Instant, Output = Duration>`、
 //! `'static`），编译期已验证。
+//!
+//! # `CLOCK` 门控：没声明就没有 `now()`
+//!
+//! 读时刻是**独立的一位能力**（[`CLOCK`](abs_art::CLOCK)），不复用
+//! [`DELAY`](abs_art::DELAY)：`impl TrClock for Runtime<CAPS>` 要求
+//! `[(); CAPS]: HasClock`，因此只写 `DELAY` 的运行时值**没有** `now()`：
+//!
+//! ```compile_fail
+//! use abs_art::DELAY;
+//! use abs_art_compio::Runtime;
+//!
+//! let rt = compio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async {
+//!     let value = Runtime::<{ DELAY }>::current();
+//!     // 没写 CLOCK → 没有 now()
+//!     // 实测原文（E0599）：no method named `now` found for struct
+//!     // `abs_art_compio::Runtime<2>` in the current scope
+//!     let _ = value.now();
+//! });
+//! ```
+//!
+//! 更值得注意的是**同源约束的连带后果**：`TrTime: TrDelay + TrClock`
+//! （[`abs_art::time`] 的定义），而本 crate 的 `TrTime` impl 也门控在这两个位上，于是
+//! **`interval` / `timeout` 同样要声明 `CLOCK`**——明明只想要周期源，也得承认自己
+//! 依赖同一个钟：
+//!
+//! ```compile_fail
+//! use abs_art::DELAY;
+//! use abs_art_compio::Runtime;
+//!
+//! let rt = compio::runtime::Runtime::new().unwrap();
+//! rt.block_on(async {
+//!     let value = Runtime::<{ DELAY }>::current();
+//!     // TrTime: TrDelay + TrClock → 要 interval 就得同时有 CLOCK
+//!     // 实测原文（E0599）：no method named `interval` found for struct
+//!     // `abs_art_compio::Runtime<2>` in the current scope
+//!     let _ = value.interval(core::time::Duration::from_millis(1));
+//! });
+//! ```
+//!
+//! 反过来，`DELAY | CLOCK` 就够用（`delay` / `now` / `interval` / `timeout` 齐备），
+//! 后缀 `timeout` 走的还是 `TrTime` 的默认方法：
+//!
+//! ```
+//! use abs_art::{CLOCK, DELAY, TrClock, TrDelay, TrInterval, TrTime};
+//! use abs_art_compio::Runtime;
+//!
+//! let rt = compio::runtime::Runtime::new().unwrap();
+//! let out = rt.block_on(async {
+//!     let value = Runtime::<{ DELAY | CLOCK }>::current();
+//!     let before = value.now();
+//!     value.delay(core::time::Duration::from_millis(1)).await;
+//!     let mut period = value.interval(core::time::Duration::from_millis(1));
+//!     period.tick().await;
+//!     let timed = value
+//!         .timeout(core::time::Duration::from_millis(1), async { 42u8 })
+//!         .await
+//!         .unwrap_or(0);
+//!     assert!(value.now() - before >= core::time::Duration::from_millis(1));
+//!     timed
+//! });
+//! assert_eq!(out, 42);
+//! ```
 
 use core::{future::Future, time::Duration};
 
-use abs_art::{HasDelay, TrClock, TrInterval, TrTime};
+use abs_art::{HasClock, HasDelay, TrClock, TrInterval, TrTime};
 
-use crate::Runtime;
+use crate::{CompioCaps_, Runtime};
 
 /// 本后端的周期源（[`TrTime::Interval`] 的具体类型）。
 #[derive(Debug)]
@@ -55,9 +118,12 @@ impl TrInterval for Interval {
     }
 }
 
+/// [`TrClock`] 的门控是**独立的一位** [`CLOCK`](abs_art::CLOCK)：写 `DELAY` 不等于
+/// 写 `CLOCK`，只读表不等待的后端/调用方可以只写后者。
 impl<const CAPS: usize> TrClock for Runtime<CAPS>
 where
-    [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
+    [(); CAPS]: CompioCaps_,
 {
     /// 与 [`TrDelay`](abs_art::TrDelay) 的计时器**同一时间基准**：
     /// `compio::runtime::time` 的 `sleep_until` / `interval_at` 形参就是
@@ -72,9 +138,15 @@ where
     }
 }
 
+/// [`TrTime: TrDelay + TrClock`](TrTime)：本 impl 必须同时门控
+/// `[(); CAPS]: HasDelay`（满足 `TrDelay` 超 trait）与 `[(); CAPS]: HasClock`
+/// （满足 `TrClock` 超 trait），所以 `interval` / `timeout` **要 CLOCK 与 DELAY
+/// 两个位**——这是「与计时器同源」那条结构约束的直接后果，不是额外要求。
 impl<const CAPS: usize> TrTime for Runtime<CAPS>
 where
     [(); CAPS]: HasDelay,
+    [(); CAPS]: HasClock,
+    [(); CAPS]: CompioCaps_,
 {
     type Interval = Interval;
 
@@ -103,6 +175,8 @@ mod tests {
     use std::time::Instant;
 
     use abs_art::{TrClock, TrDelay, TrInterval, TrTime};
+
+    use crate::Runtime;
 
     /// 建一个 compio 运行时。
     fn rt_() -> compio::runtime::Runtime {
@@ -187,6 +261,45 @@ mod tests {
         rt.block_on(async {
             let value = crate::current();
             let _ = value.interval(Duration::ZERO);
+        });
+    }
+
+    /// 目的：验证 `DELAY | CLOCK` 两个位就凑齐全部计时能力——`now`（只要 `CLOCK`）、
+    /// `delay`（只要 `DELAY`）、`interval` 与 `timeout`（`TrTime`，两个位都要）。
+    ///
+    /// 实施策略：在 compio 运行时上下文内用 `Runtime::<{ DELAY | CLOCK }>::current()`
+    /// 构造运行时值，依次读 `now()`、`delay` 睡 1 ms、取 `interval` 并 tick 一次、
+    /// 对已就绪的 future 施加 1 ms `timeout`。
+    ///
+    /// 通过依据：`now()` 的两次读值之差 `>= 1 ms`（钟与 delay 同源）、首次 tick 立即
+    /// 返回（`< 1 s`）、`timeout` 返回 `Ok(42)`。若 `HasClock` 门控写错（例如仍挂在
+    /// `HasDelay` 上），本用例里 `now()` 依旧可用但门控含义失真，编译期正例由
+    /// `abs_art::caps` 侧的 32 掩码表与模块文档里的 `compile_fail` 用例共同钉住。
+    #[test]
+    fn delay_and_clock_give_full_time_capabilities() {
+        use abs_art::{CLOCK, DELAY};
+
+        let rt = rt_();
+        rt.block_on(async {
+            let value = Runtime::<{ DELAY | CLOCK }>::current();
+
+            let before = value.now();
+            value.delay(Duration::from_millis(1)).await;
+            assert!(
+                value.now() - before >= Duration::from_millis(1),
+                "now() 与 delay 的钟不同源：差值为 {:?}",
+                value.now() - before
+            );
+
+            let mut period = value.interval(Duration::from_secs(5));
+            let started = Instant::now();
+            period.tick().await;
+            assert!(started.elapsed() < Duration::from_secs(1), "首次 tick 应立即可用");
+
+            let out = value
+                .timeout(Duration::from_millis(1), async { 42u8 })
+                .await;
+            assert_eq!(out.expect("已就绪的 future 不该超时"), 42u8);
         });
     }
 

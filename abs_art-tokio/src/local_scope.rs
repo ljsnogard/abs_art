@@ -305,3 +305,128 @@ mod tests {
         });
     }
 }
+
+#[cfg(feature = "mock-clock")]
+impl LocalScope {
+    /// 用**手动时钟**驱动本作用域：队列照常被驱动，而时间由测试自己推进。
+    ///
+    /// 这是「同一份业务代码跑虚拟时间测试」的入口：`body` 里用
+    /// [`abs_art_mock_clock::ManualTime`] 的 `delay` / `interval` / `now`，驱动会在
+    /// 「没有别的活可干」时把时钟推进到下一个到期时刻。
+    ///
+    /// # 上下文
+    ///
+    /// - 在运行时上下文**之外**调用：直接 `Handle::block_on`；
+    /// - 在上下文**之内**调用：走 `block_in_place` 让渡当前 worker，因此要求多线程运行时
+    ///   （`current_thread` 下该分支会 panic，与 tokio 的规定一致）。
+    ///
+    /// # Panics
+    ///
+    /// 主体既没有就绪任务、也没有可推进的定时器时 panic（把静默挂起变成响亮失败）。
+    pub fn block_on_advancing<F, C>(&self, clock: &C, body: F) -> <F as Future>::Output
+    where
+        F: Future,
+        C: abs_art_mock_clock::ManualClockApi,
+    {
+        let handle = self.handle_.clone();
+        let local = Rc::clone(&self.local_);
+        let supervisor = abs_art_mock_clock::Supervisor::new(body, clock.clone(), || false);
+        let run = move || handle.block_on(local.run_until(supervisor));
+        match tokio::runtime::Handle::try_current() {
+            Ok(_) => tokio::task::block_in_place(run),
+            Err(_) => run(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "mock-clock"))]
+mod mock_clock_tests_ {
+    //! tokio 后端接上手动时钟之后的虚拟时间行为。
+
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use abs_art::{TrClock, TrDelay, TrLocalScope};
+    use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};
+
+    /// 建一个多线程 tokio 运行时（`block_in_place` 分支需要）。
+    fn rt_() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("建多线程 tokio 运行时")
+    }
+
+    /// 目的：验证「虚拟一小时」在真实时间里几乎瞬间完成，且时刻与计时器同源。
+    ///
+    /// 手段：取运行时值与作用域，用 `ManualTime` 装饰后 `block_on_advancing` 跑
+    /// `delay(1h)`，记录真实耗时与虚拟时刻。
+    ///
+    /// 通过依据：真实耗时 < 1s（虚拟时间没有被真的等），虚拟时刻恰好是 3600_000ms。
+    #[test]
+    fn virtual_hour_passes_instantly() {
+        let rt = rt_();
+        let (scope, value) = rt.block_on(async {
+            let value = crate::current();
+            let scope = value.local_scope();
+            (scope, value)
+        });
+
+        let clock = ManualClock::new();
+        let timed = ManualTime::new(value, clock.clone());
+
+        let started = std::time::Instant::now();
+        let virtual_now = scope.block_on_advancing(&clock, async {
+            timed.delay(Duration::from_secs(3_600)).await;
+            timed.now()
+        });
+        let real = started.elapsed();
+
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+        assert_eq!(virtual_now.as_millis(), 3_600_000);
+        assert_eq!(clock.now().as_millis(), 3_600_000);
+    }
+
+    /// 目的：验证**投递到本地队列的任务**同样跑在虚拟时间上。
+    ///
+    /// 手段：`spawn_local` 一个睡虚拟 30 分钟的任务（任务内自建 `ManualTime`），
+    /// 主体 await 它的句柄，全程由 `block_on_advancing` 驱动。
+    ///
+    /// 通过依据：取回 42，虚拟时刻推进到 1800_000ms，真实耗时 < 1s。
+    #[test]
+    fn spawned_local_task_runs_on_virtual_time() {
+        let rt = rt_();
+        let (scope, value) = rt.block_on(async {
+            let value = crate::current();
+            let scope = value.local_scope();
+            (scope, value)
+        });
+
+        let clock = ManualClock::new();
+        let started = std::time::Instant::now();
+        // 作用域是 `Clone` 的（共享同一条队列），主体里用的是克隆体。
+        let scope_in_body = scope.clone();
+        let out = scope.block_on_advancing(&clock, {
+            let clock = clock.clone();
+            let inner = value;
+            async move {
+                let handle = scope_in_body.spawn_local({
+                    let clock = clock.clone();
+                    async move {
+                        let timed = ManualTime::new(inner, clock);
+                        timed.delay(Duration::from_secs(1_800)).await;
+                        42u32
+                    }
+                });
+                handle.await.unwrap()
+            }
+        });
+        let real = started.elapsed();
+
+        assert_eq!(out, 42);
+        assert_eq!(clock.now().as_millis(), 1_800_000);
+        assert!(real < Duration::from_secs(1), "真实耗时 {real:?}");
+        let _ = Rc::new(());
+    }
+}
