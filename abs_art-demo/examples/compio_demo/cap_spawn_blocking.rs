@@ -34,7 +34,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bridge_compio::{BLOCK_ON, Runtime, SPAWN_BLOCKING, TrBlockOn, TrSpawnBlocking};
+use bridge_compio::{BLOCK_ON, CompioRuntime as Runtime, SPAWN_BLOCKING, TrBlockOn, TrSpawnBlocking};
 
 /// 能力声明：`block_on` + `spawn_blocking`。
 type BlockingRt = Runtime<{ BLOCK_ON | SPAWN_BLOCKING }>;

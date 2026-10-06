@@ -32,7 +32,7 @@
 //!   编译错误）：`current()` 需要环境运行时，见 `strict_mode_check` 的
 //!   `no_context_construction`。
 
-use bridge_compio::{Runtime, RuntimeTag, TrAsyncRuntime};
+use bridge_compio::{CompioRuntime as Runtime, RuntimeTag, TrAsyncRuntime};
 
 /// 零能力声明：这个值不承诺任何运行时能力。
 type ZeroRt = Runtime<0>;

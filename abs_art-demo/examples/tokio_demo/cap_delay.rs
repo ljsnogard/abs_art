@@ -36,7 +36,7 @@
 
 use std::time::{Duration, Instant};
 
-use bridge_tokio::{DELAY, Runtime, TrClock, TrDelay};
+use bridge_tokio::{DELAY, TokioRuntime as Runtime, TrClock, TrDelay};
 
 /// 能力声明：只请求 `delay` 一位——按抽象层的设计，这一位同时覆盖
 /// `TrDelay`（睡眠）与 `TrClock`（时刻）。

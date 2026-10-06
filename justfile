@@ -3,11 +3,12 @@ test:
     cargo run -q -p abs_art-demo
 
 # 运行 abs_art-demo 的 tokio 组 cap smoke tests（examples/tokio_demo/）
+# 缺省演示组是 compio，因此这里必须显式关掉缺省 features 再选 tokio 组。
 demo-tokio:
-    for ex in cap_block_on cap_spawn_send cap_spawn_local cap_delay cap_spawn_blocking cap_full cap_zero; do cargo run -q -p abs_art-demo --example tokio_$ex || exit 1; done
+    for ex in cap_block_on cap_spawn_send cap_spawn_local cap_delay cap_spawn_blocking cap_full cap_zero; do cargo run -q -p abs_art-demo --no-default-features --features demo-tokio --example tokio_$ex || exit 1; done
 
-# 运行 abs_art-demo 的 compio 组 cap smoke tests（examples/compio_demo/）
-# compio 组与 tokio 组互斥：需要 --no-default-features --features demo-compio
+# 运行 abs_art-demo 的 compio 组 cap smoke tests（examples/compio_demo/）——它是**缺省**组。
+# 两组互斥：tokio 组要显式 --no-default-features --features demo-tokio。
 demo-compio:
     for ex in cap_block_on cap_spawn_send cap_spawn_local cap_delay cap_spawn_blocking cap_full cap_zero; do cargo run -q -p abs_art-demo --no-default-features --features demo-compio --example compio_$ex || exit 1; done
 

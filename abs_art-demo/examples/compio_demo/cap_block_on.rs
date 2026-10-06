@@ -40,7 +40,7 @@
 //!   compio 的运行时值**根本不实现** `TrSpawnSend`，所以 `spawn` 不是
 //!   「约束不满足」而是「方法不存在」（见 `cap_spawn_send.rs` 的反向演示）。
 
-use bridge_compio::{BLOCK_ON, Runtime, TrBlockOn};
+use bridge_compio::{BLOCK_ON, CompioRuntime as Runtime, TrBlockOn};
 
 /// 能力声明：只请求 `block_on` 一种能力。
 ///

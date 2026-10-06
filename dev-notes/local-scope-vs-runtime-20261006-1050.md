@@ -160,3 +160,66 @@ bridge/demo/smoke 适配 → 全 workspace 测试。
 - **`SPAWN_SEND` 位在 compio 上不再对应任何实现**：位仍可写（它是声明），但写了也拿不到 `spawn`。是否要在文档/错误信息里把这条讲得更直白，或干脆让 compio 的类型别名不推荐该位，未定。
 - **`LocalScope` 的 `!Send` 与「构造函数不公开」没有编译期负向断言**（stable 写不出否定约束；构造函数私有只靠 `pub(crate)`）。
 - **smoke 第 5 条契约是回归闸门而非证明**：类型系统没有负实现，若将来有人给作用域实现了 `TrTime`，该契约不会红（已在探针文档写明）。
+
+---
+
+## 6. 缺省后端定为 compio，并补齐「每后端一格」的桥接测试（同日追加）
+
+### 6.1 裁决
+
+`abs_art-bridge` 的缺省后端从 tokio 改为 **compio**（`abs_art-demo` 的缺省演示组随之
+改为 `demo-compio`，与 bridge 缺省保持一致）。
+
+### 6.2 写法必须是 `default-backend-compio`，不能是裸 `backend-compio`
+
+差别只在「默认是谁」有没有**显式声明**，但后果是构建过不过：
+
+| 场景 | `default = ["backend-compio"]` | `default = ["default-backend-compio"]` |
+| --- | --- | --- |
+| `cargo build -p abs_art-bridge`（默认） | ok | ok |
+| **默认 + `--features backend-tokio`**（≈ `cargo test --workspace`：bridge 作为 workspace 成员的缺省 feature 与 demo 的 `bridge_tokio` 取并集） | **`compile_error!`**（并集里两个后端、却没有默认声明） | ok |
+
+也就是说：缺省后端改了之后，**必须**把「默认」写成声明式 feature，否则 workspace 级
+构建会踩到「多后端必须显式声明默认」这条守卫（守卫本身是对的，见
+`runtime-static-proposal-20261006-1043.md` 的 P5 实测）。
+
+`justfile` 与 README 里所有「默认 = tokio」的说明一并改掉；`demo-tokio` 配方补上了
+`--no-default-features --features demo-tokio`（缺省换人之后不关缺省就选不到 tokio 组）。
+
+### 6.3 桥接测试补成「每后端一格」
+
+`abs_art-bridge` 原来只有 `tests_tokio_` 一个测试模块。现在三个：
+
+| 模块 | 门控 | 验证 |
+| --- | --- | --- |
+| `tests_tokio_` | `all(test, feature = "backend-tokio")` | `tag() == Tokio`、`local_scope()` 可用、`!Send` 任务跑通、运行时值 `Send + Sync` |
+| `tests_compio_` | `all(test, feature = "backend-compio")` | `tag() == Compio`、`local_scope()` 可用、`!Send` 任务经 `run_until` 跑通 |
+| `tests_smol_` | `all(test, feature = "backend-smol")` | `tag() == Smol`、作用域 `block_on` 驱动任务、运行时值 `Send + Sync` |
+
+**三个模块都用具名别名**（`TokioRuntime as Runtime` / `CompioRuntime as Runtime` /
+`SmolRuntime as Runtime`），不用裸名——否则在「缺省 compio + 下游要 tokio」的并集构建里，
+tokio 模块会拿到 compio 的类型（这正是 6.2 那个并集场景）。实测并集构建下 4 条用例
+（compio 2 + tokio 2）全部运行并通过。
+
+### 6.4 demo 侧的同源修正
+
+`bridge_tokio` 与 `bridge_compio` 在 workspace 构建里是**同一个包**（feature 取并集），
+所以 `abs_art_bridge::Runtime` 这种裸名会跟着 bridge 的缺省后端走，而 demo 自己的
+`demo-*` 分组才是它真正想要的。因此：
+
+- `abs_art-demo/src/lib.rs` 不再重导出 bridge 的裸名 `Runtime` / `LocalScope` /
+  `current`，改为按分组 `pub use abs_art_bridge::{TokioRuntime as Runtime, …}`，并自带
+  分组内的 `current()`（供 doctest 用）；
+- 14 个示例的 `use bridge_{tokio,compio}::Runtime` 全部改成
+  `TokioRuntime as Runtime` / `CompioRuntime as Runtime`。
+
+### 6.5 验证（全部实跑）
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test --workspace` | **21/21 目标 ok，0 失败** |
+| bridge 三组测试 | 默认（compio）2 + 2 doctests；`--features backend-tokio` 4 用例（compio 2 + tokio 2）；`--features backend-smol` 1 + 2 doctests |
+| `just demo`（14 个示例 × 两组） | 全通；tokio 组 `tag=Tokio`、compio 组 `tag=Compio` |
+| `just test` | **EXIT=0**，`abs_art-demo (compio backend) OK: local=42, local_tasks=42` |
+| clippy（workspace + demo 两组） | 各 crate 0 诊断 |
+| 守卫矩阵 | 默认 ok / 默认+tokio ok / 多后端无默认 `compile_error` / 多后端+一个默认 ok / 两个默认 `compile_error` |

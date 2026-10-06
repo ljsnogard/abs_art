@@ -46,7 +46,7 @@
 use std::time::Duration;
 
 use bridge_compio::{
-    FULL, Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
+    FULL, CompioRuntime as Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
     TrSpawnBlocking,
 };
 

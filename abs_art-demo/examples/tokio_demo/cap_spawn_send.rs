@@ -42,7 +42,7 @@
 
 use core::future::Future;
 
-use bridge_tokio::{BLOCK_ON, Runtime, SPAWN_SEND, TrBlockOn, TrJoinHandle, TrSpawnSend};
+use bridge_tokio::{BLOCK_ON, TokioRuntime as Runtime, SPAWN_SEND, TrBlockOn, TrJoinHandle, TrSpawnSend};
 
 /// 能力声明：`block_on` + `spawn_send`（与业务库 `CapRt` 同构的能力组合）。
 type SendRt = Runtime<{ BLOCK_ON | SPAWN_SEND }>;

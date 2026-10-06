@@ -43,7 +43,7 @@
 use std::time::Duration;
 
 use bridge_tokio::{
-    FULL, Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
+    FULL, TokioRuntime as Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
     TrSpawnBlocking, TrSpawnSend,
 };
 

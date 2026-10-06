@@ -31,22 +31,18 @@ default-backend-compio = ["backend-compio"]
 default-backend-tokio = ["backend-tokio"]
 default-backend-smol = ["backend-smol"]
 
-# 缺省后端 = tokio。
+# 缺省后端 = compio。
 #
-# 为什么缺省值必须与「workspace 里其它成员所用的后端」一致：`cargo test
-# --workspace` 会把同一个 `abs_art-bridge` 的 feature **取并集**——一边是
-# 它作为 workspace 成员被启用 default features，一边是 `abs_art-demo` 以
-# `bridge_tokio`（backend-tokio）依赖它。若缺省值与 demo 的缺省演示组不同，
-# 并集里就会同时出现两个 backend，触发下面的 `compile_error!`，整个
-# `cargo test --workspace` 直接编译失败。
-#
-# 因此：改这里的缺省值，必须同时改 `abs_art-demo` 的缺省演示组（`demo-*`），
-# 否则 workspace 级测试会红。反过来，只想用某一个后端时，正确写法始终是
-# 显式指定：
-#
-#   abs_art-bridge = { ..., default-features = false, features = ["backend-smol"] }
-default = ["backend-compio"]
+# 写法是 `default-backend-compio` 而不是裸的 `backend-compio`：这样「默认是谁」是
+# **显式声明**的，于是 `cargo test --workspace` 把 bridge 的缺省 feature 与下游
+# （如 `abs_art-demo` 的 `bridge_tokio`）所用的后端取并集时，裸名仍有唯一解；
+# 若只写裸 `backend-compio`，并集里出现两个后端就会触发下面的守卫而编译失败。
+default = ["default-backend-compio"]
 
-# 仅测试用：桥接 crate 的烟雾测试需要一个真实运行时来驱动 tokio 后端。
+# 仅测试用：桥接 crate 的烟雾测试需要真实运行时来驱动各后端。
+# 三个测试模块各自用**具名别名**（TokioRuntime / CompioRuntime / SmolRuntime），
+# 因此互不干扰、也不受 bridge 缺省后端的影响。
 [dev-dependencies]
+compio = { workspace = true }
+smol = { workspace = true }
 tokio = { workspace = true }

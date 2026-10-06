@@ -1,5 +1,12 @@
 # 两个 API 提案的裁决：`current() -> &'static Runtime` 与 `local_clone(&self)`
 
+> **更新（同日，队列搬回 `LocalScope` 之后）**：本笔记 §1.1 的第一层理由**已经不成立**——
+> 当时 tokio 的运行时值里装着 `Rc<LocalSet>`（`!Sync`），所以进不了 `static`；现在本地队列
+> 回到独立的 `LocalScope`，**tokio / smol 的运行时值确实可以放进 `static`**（实测
+> `static OnceLock<Runtime<{FULL}>>` 现在 EXIT=0）。判定随之更新：**仍然不建议把
+> `current()` 改成 `&'static`**，但理由换成新的三条（§4）。本文其余部分（泛型 `CAPS`
+> 做不出静态项、`'static` 不是唯一解、`local_clone` 的命名裁决）仍然有效。
+
 日期：2026-10-06 10:43
 分支：`feat/abs_art-runtime`（值化改造已落地，见 `runtime-value-20261006-1022.md`）
 性质：**可行性实测 + 设计裁决**（本轮不改公开 API，只加探针）
@@ -134,3 +141,64 @@ Rust 没有「按 const 泛型实例化的静态项」（no polymorphic statics�
   不参与推断）。目前只有 crate 级自由函数（`abs_art_tokio::current()`）免疫。
   低成本缓解：给其余构造函数也配自由函数（`abs_art_tokio::with_handle(h) -> Runtime<FULL>`），
   或让调用点写类型标注。**留作待裁决项**。
+
+---
+
+## 4. 复查（队列剥离之后）：能做了，但仍不该做
+
+`LocalScope` 拆分把「本地队列」从运行时值里拿掉之后，§1.1 那条 `E0277` 消失了。重新实测
+（探针 `abs_art_runtime_probe/p6b_static_after_split/`，4 个 crate + 2 份原始日志）：
+
+| # | 形状 | 结果 |
+| --- | --- | --- |
+| ① | `static RT: OnceLock<abs_art_tokio::Runtime<{ FULL }>>` | **EXIT=0（现在能编译）** |
+| ② | `static RT: OnceLock<abs_art_compio::Runtime<{ FULL }>>` | `E0277`：`Rc<compio_executor::Executor>` cannot be shared between threads safely |
+| ③ | `fn current_static<const C: usize>() -> &'static Runtime<C>` | `E0401`：can't use generic parameters from outer item（+ `E0747`） |
+| ④ | 语义实验（两个 tokio 运行时 A、B + 一个进程级 static 把手） | 见下 |
+
+④ 的原始输出：
+
+```text
+[语义] 在 B 的上下文里用 static 把手 spawn → 结果 1（任务其实投到了 A）
+[对照] 自己持有 clone（A 仍活着）→ 结果 3，所有权明确、寿命由持有者决定
+[语义] A 被 drop 之后，static 把手投出的任务结果 = Err(JoinError::Cancelled(Id(5)))（Cancelled = 静默失效）
+```
+
+### 为什么仍然不建议
+
+1. **compio 做不到，而且不该做**（②）。它的运行时值是 `Rc` 句柄簇 → 进不了 `static`；
+   而且 compio 的模型本来就是**每线程一份运行时**，把它做成进程级单例是语义错误。
+   一个只在两个后端成立的 `current() -> &'static` 无法进抽象层。
+2. **泛型 `CAPS` 做不到**（③，与 §1.2 同因）。只能是某个固定实例（如 `FULL`）的静态项，
+   于是 `Runtime::<{ BLOCK_ON }>::current()` 这条「声明能力」的路径要么失去 `'static`，
+   要么分裂出两套入口。
+3. **它把「哪个运行时」重新变成进程级隐式状态**（④）。实测两点：
+   - **串**：在 B 的上下文里用 static 把手投递，任务落在**最先调用 `current()` 的那个**
+     运行时 A 上——这正是当初「作用域/时钟会串」的同类问题，只是换了个形状；
+   - **静默失效**：A 被 `drop` 之后 static 把手仍然存在，但投出去的任务直接是
+     `Cancelled`——没有编译期错误，也没有 panic，只是不干活。
+   多运行时进程（并行测试、多租户、多 runtime 的库）都会踩这两条。
+
+### 那 lifetime 问题怎么办：**拥有**，不要 `'static`
+
+`'static` 想解决的「future 里借用运行时」有更便宜的解法：把值**clone 进** future。
+
+```rust
+let rt = rt.clone();                    // tokio: Arc 克隆；smol: ZST；compio: Rc 克隆
+rt.spawn(async move { rt.delay(..).await });   // future 是 'static 的，无需全局 static
+```
+
+④ 的「对照」行就是这个形状：所有权明确、运行时寿命由持有者决定。
+
+### 结论（更新）
+
+- **`current()` 保持返回 `Self`**，不做 `&'static`。
+- 「要不要让运行时值活得和进程一样久」是**应用**的策略决定，不是库的 API：现在应用
+  **可以**自己写 `static RT: OnceLock<Runtime<{ FULL }>>`（这正是队列剥离之后才成立的
+  能力，对 tokio / smol 有效），而库不应该替它把这个决定固化成唯一入口。
+- 若日后确实要提供便利，命名必须让「进程级单例」显式（例如
+  `abs_art_tokio::shared() -> &'static Runtime<{ FULL }>`），并在文档里写明「多运行时
+  进程不要用」，以及 §4 ④ 的两条实测后果。
+- **`LocalScope` 绝不能做成 `&'static`**：它持 `Rc`（进不了 `static`），而一旦 leak 出来，
+  挂起的本地任务（及其捕获的资源）将永不被析构（P6 实测：`drop(value)` 后哨兵计数 1，
+  leak 后计数 0）。

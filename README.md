@@ -156,7 +156,7 @@ abs_art-bridge     桥接：backend-tokio / backend-compio / backend-smol 可多
 
 abs_art-demo       演示：业务库（零泛型穿透）+ 二进制（选后端）
                     examples/ 下按后端分组（tokio_demo / compio_demo）的
-                    每种 cap 一个 smoke test（features：demo-tokio / demo-compio）
+                    每种 cap 一个 smoke test（features：demo-compio 默认 / demo-tokio）
 
 abs_art-smoke      跨后端 spawn_local 行为契约冒烟测试（publish = false）
                     同一份测试体（本地投递泛型于作用域值 S: TrLocalScope，时间泛型于运行时值 R: TrTime）分别跑在三个
@@ -263,7 +263,7 @@ scope.block_on(async { .. });            // 阻塞驱动点（同时驱动队列
 
 ```sh
 cargo test --workspace        # 全部 crate 的测试
-cargo run -p abs_art-demo     # 运行演示（业务库 + tokio 后端）
+cargo run -p abs_art-demo     # 运行演示（默认 compio 后端；tokio 组见下）
 just demo                     # 跑 abs_art-demo 两组 cap smoke tests（tokio + compio）
 just smoke                    # 跑跨后端 spawn_local 行为契约矩阵（见下）
 ```
@@ -291,9 +291,10 @@ smol 的 B、C 两格失败：那时 `abs_art-smol` 每次 `spawn_local` 都新�
 `examples/compio_demo/`，每种 cap 组合一个 example）：
 
 ```sh
-just demo-tokio                                             # tokio 组（默认 features）
+just demo-tokio                                             # tokio 组（--no-default-features --features demo-tokio）
 just demo-compio                                            # compio 组（--no-default-features --features demo-compio）
-cargo run -p abs_art-demo --no-default-features --features demo-compio   # compio 后端跑 main
+cargo run -p abs_art-demo                                                # compio 后端跑 main（默认）
+cargo run -p abs_art-demo --no-default-features --features demo-tokio     # tokio 后端跑 main
 ```
 
 # develop

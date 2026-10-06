@@ -53,7 +53,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use bridge_tokio::{Runtime, SPAWN_LOCAL, TrLocalScope};
+use bridge_tokio::{TokioRuntime as Runtime, SPAWN_LOCAL, TrLocalScope};
 
 /// 能力声明：本地投递**必须**被写下来（`SPAWN_LOCAL` 位）。
 ///

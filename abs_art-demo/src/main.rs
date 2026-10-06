@@ -3,8 +3,8 @@
 //!
 //! 后端选择发生在 `Cargo.toml`（`demo-tokio` / `demo-compio` feature）：
 //!
-//! - 默认 `demo-tokio`：创建 tokio 运行时；
-//! - `--no-default-features --features demo-compio`：创建 compio 运行时。
+//! - **默认 `demo-compio`**：创建 compio 运行时；
+//! - `--no-default-features --features demo-tokio`：创建 tokio 运行时。
 //!
 //! 本文件是唯一允许感知后端的地方：创建哪个运行时的代码必须与所选后端一致；
 //! 业务库（`src/lib.rs`）在两种后端下零改动。

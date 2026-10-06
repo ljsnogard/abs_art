@@ -51,7 +51,7 @@
 
 use core::future::Future;
 
-use bridge_compio::{FULL, Runtime, TrJoinHandle, TrLocalScope};
+use bridge_compio::{FULL, CompioRuntime as Runtime, TrJoinHandle, TrLocalScope};
 
 /// 能力声明：写上 `FULL`（含 `SPAWN_SEND` 位）正是为了说明——
 /// **即便这一位写着，compio 的运行时值仍然没有 `spawn`**。

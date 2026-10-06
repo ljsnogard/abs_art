@@ -11,7 +11,8 @@ categories.workspace = true
 publish = false
 
 # ---------------------------------------------------------------
-# 演示组选择：demo-tokio（默认）与 demo-compio **互斥**，一次构建只能启用一个。
+# 演示组选择：**默认 demo-compio**；demo-tokio 与 demo-compio **互斥**，一次构建只能
+# 启用一个（与 `abs_art-bridge` 的缺省后端保持一致：bridge 默认也是 compio）。
 #
 #   cargo run  -p abs_art-demo                                            # tokio 组（默认）
 #   cargo run  -p abs_art-demo --no-default-features --features demo-compio  # compio 组
@@ -19,7 +20,7 @@ publish = false
 # 两个 feature 同时启用会触发 src/lib.rs 里的 compile_error（响亮报错）。
 # ---------------------------------------------------------------
 [features]
-default = ["demo-tokio"]
+default = ["demo-compio"]
 demo-tokio  = ["dep:bridge_tokio", "dep:tokio"]
 demo-compio = ["dep:bridge_compio", "dep:compio"]
 

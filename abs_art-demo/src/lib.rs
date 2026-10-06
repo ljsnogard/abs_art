@@ -106,7 +106,7 @@ compile_error!("abs_art-demo：demo-tokio 与 demo-compio 互斥，一次构建�
 
 // 至少要启用一个演示组，否则上面的 abs_art_bridge 别名不存在。
 #[cfg(not(any(feature = "demo-tokio", feature = "demo-compio")))]
-compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（默认 demo-tokio）");
+compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（默认 demo-compio）");
 
 /// 能力项与类型再导出：业务库对外暴露与后端无关的入口。
 ///
@@ -116,18 +116,50 @@ compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（
 /// 注意 [`TrLocalScope`] 在这里是**作用域**的契约：它的宿主是
 /// `Runtime::local_scope()` 交出的 `LocalScope` 值，不是运行时值本身。
 pub use abs_art_bridge::{
-    BLOCK_ON, DELAY, FULL, LocalScope, Runtime, RuntimeTag, SPAWN_BLOCKING,
-    SPAWN_LOCAL, SPAWN_SEND, TrAsyncRuntime, TrBlockOn, TrClock, TrDelay,
-    TrJoinHandle, TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, current,
+    BLOCK_ON, DELAY, FULL, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
+    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
+    TrSpawnBlocking, TrSpawnSend, TrTime,
 };
 
-/// 具名别名：当前后端（tokio）的运行时与作用域类型。
-#[cfg(feature = "demo-tokio")]
-pub use abs_art_bridge::{TokioLocalScope, TokioRuntime};
+// ── 后端相关的名字：用**具名别名**绑定到本 crate 的 demo-* 分组 ──────────
+//
+// 刻意**不**重导出 bridge 的裸名 `Runtime` / `LocalScope` / `current`：bridge 的裸名
+// 跟着它自己的**缺省后端**走，而 `cargo test --workspace` 会把 bridge 的 feature
+// 取并集（bridge 的缺省后端 + 本 crate 的 `bridge_*` 依赖所用的后端）。用具名别名与
+// `demo-*` 分组绑定之后，「当前后端」只由本 crate 的 feature 决定，不受并集影响。
 
-/// 具名别名：当前后端（compio）的运行时与作用域类型。
+/// 当前分组（tokio）的运行时与作用域类型（含具名别名）。
+#[cfg(feature = "demo-tokio")]
+pub use abs_art_bridge::{
+    TokioLocalScope, TokioLocalScope as LocalScope, TokioRuntime,
+    TokioRuntime as Runtime,
+};
+
+/// 当前分组（compio）的运行时与作用域类型（含具名别名）。
 #[cfg(feature = "demo-compio")]
-pub use abs_art_bridge::{CompioLocalScope, CompioRuntime};
+pub use abs_art_bridge::{
+    CompioLocalScope, CompioLocalScope as LocalScope, CompioRuntime,
+    CompioRuntime as Runtime,
+};
+
+/// 用**当前分组**的运行时上下文构造全能力运行时值。
+///
+/// 等价于 `Runtime::<{ FULL }>::current()`；单独给出是为了让示例与 doctest 不必写
+/// 类型参数（`Runtime::current()` 写在表达式位置会 `E0284`）。
+///
+/// # Panics
+///
+/// 不在当前分组的运行时上下文内时 panic（与后端 `current()` 的前提一致）。
+#[cfg(feature = "demo-tokio")]
+pub fn current() -> Runtime<{ FULL }> {
+    Runtime::<{ FULL }>::current()
+}
+
+/// 用**当前分组**的运行时上下文构造全能力运行时值（compio 版）。
+#[cfg(feature = "demo-compio")]
+pub fn current() -> Runtime<{ FULL }> {
+    Runtime::<{ FULL }>::current()
+}
 
 // =====================================================================
 // 共同子集：不含 TrSpawnSend，两种后端都能编译。

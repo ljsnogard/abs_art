@@ -40,7 +40,7 @@
 //!   `block_on` 能过、`spawn` 不能过，这正是「可以做到什么」与「不能做到什么」
 //!   的精确分界线。
 
-use bridge_tokio::{BLOCK_ON, Runtime, TrBlockOn};
+use bridge_tokio::{BLOCK_ON, TokioRuntime as Runtime, TrBlockOn};
 
 /// 能力声明：只请求 `block_on` 一种能力。
 ///
