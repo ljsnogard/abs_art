@@ -2,7 +2,7 @@
 
 use core::time::Duration;
 
-use crate::{join_handle::JoinHandle, Runtime};
+use crate::{Runtime, join_handle::JoinHandle};
 use abs_art::{HasDelay, TrDelay};
 
 /// 异步地睡眠 `duration`。
@@ -74,11 +74,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let out = rt.block_on(async {
-            delayed(Duration::from_millis(1), || 6 * 7)
-                .await
-                .unwrap()
-        });
+        let out = rt.block_on(async { delayed(Duration::from_millis(1), || 6 * 7).await.unwrap() });
 
         assert_eq!(out, 42);
     }

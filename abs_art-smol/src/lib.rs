@@ -126,9 +126,9 @@ extern crate std;
 
 // `RuntimeTag` 与基础 crate 的其它公开项一起重导出（保持本 crate 原有的公开面）。
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
-    Timeout, TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
-    TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
+    BLOCK_ON, DELAY, Elapsed, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
+    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle, TrLocalScope,
+    TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
 };
 
 /// 本后端的**完整能力集**。
@@ -403,7 +403,11 @@ mod tests {
         fn assert_spawn_blocking<T: HasSpawnBlocking>() {}
         fn assert_clock<T: HasClock>() {}
 
-        assert_eq!(FULL, abs_art::FULL, "smol 的完整能力集应与基础 crate 的全集同值");
+        assert_eq!(
+            FULL,
+            abs_art::FULL,
+            "smol 的完整能力集应与基础 crate 的全集同值"
+        );
         assert_ne!(FULL & abs_art::CLOCK, 0, "本后端的完整能力集必须含 CLOCK");
 
         assert_block_on::<[(); FULL]>();

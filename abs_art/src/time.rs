@@ -174,6 +174,15 @@ pub trait TrClock {
 /// 于是调用点形状与 tokio 一致（`rt.advance(d).await`），也避免了「同步推进完就断言」
 /// 这种与真实运行时语义不符的用法。
 ///
+/// # 为什么返回类型写成 **GAT** 而不是 RPITIT
+///
+/// [`Advance`](Self::Advance) / [`AdvanceUntil`](Self::AdvanceUntil) 是**具名的
+/// 关联类型**，而不是 `-> impl Future`（RPITIT）。理由是 auto trait 的可见性：
+/// 不透明返回类型会把 `Send` / `Sync` 这类性质对调用方隐藏，泛型代码里容易出现
+/// 「编译器判不出这个 future 是不是 `Send`」的错误；写成 GAT 之后，future 的真实类型
+/// 是实现方给的具体类型，`Send` 与否对调用方**一眼可见**。两个方法各有一个关联类型，
+/// 因为实现方常用两个不同的 `async` 块（它们本来就是两个不同的类型）。
+///
 /// # 实现契约
 ///
 /// 1. `advance` / `advance_until` 在返回的 future **被 poll 时**推进时刻，并唤醒期间
@@ -201,6 +210,16 @@ pub trait TrClock {
 /// }
 /// ```
 pub trait TrMockClock: TrClock {
+    /// [`advance`](Self::advance) 返回的 future 类型（具名关联类型，见上文 GAT 说明）。
+    type Advance<'a>: Future<Output = ()>
+    where
+        Self: 'a;
+
+    /// [`advance_until`](Self::advance_until) 返回的 future 类型。
+    type AdvanceUntil<'a>: Future<Output = ()>
+    where
+        Self: 'a;
+
     /// 冻结时钟：测试设施的自动推进停止，只有显式 `advance*` 才让时间走。
     fn pause(&self);
 
@@ -211,11 +230,11 @@ pub trait TrMockClock: TrClock {
     fn is_paused(&self) -> bool;
 
     /// 把时钟推进 `by`（参考 `tokio::time::advance`）。
-    fn advance(&self, by: Duration) -> impl Future<Output = ()>;
+    fn advance(&self, by: Duration) -> Self::Advance<'_>;
 
     /// 把时钟推进到 `at`（参考 `tokio::time::advance_until`）；
     /// 若当前时刻已在 `at` 之后，则什么也不做。
-    fn advance_until(&self, at: Self::Instant) -> impl Future<Output = ()>;
+    fn advance_until(&self, at: Self::Instant) -> Self::AdvanceUntil<'_>;
 }
 
 /// 后端的**计时能力**：按周期唤醒，以及带超时地等一个 future。
@@ -603,10 +622,7 @@ mod tests {
     /// 通过依据：结果为 `Ok(7)`。
     #[test]
     fn timeout_returns_output_when_inner_wins() {
-        let out = block_on_(FAKE_RT.timeout(
-            Duration::from_millis(10),
-            async { 7u8 },
-        ));
+        let out = block_on_(FAKE_RT.timeout(Duration::from_millis(10), async { 7u8 }));
         assert_eq!(out, Ok(7u8));
     }
 
@@ -617,10 +633,7 @@ mod tests {
     /// 通过依据：结果为 `Err`，且 `Display` 为「期限已到」。
     #[test]
     fn timeout_elapses_on_a_pending_inner_future() {
-        let out = block_on_(FAKE_RT.timeout(
-            Duration::from_millis(5),
-            pending::<u8>(),
-        ));
+        let out = block_on_(FAKE_RT.timeout(Duration::from_millis(5), pending::<u8>()));
         let elapsed = out.expect_err("期限已到应当是错误");
         assert_eq!(elapsed.to_string(), "期限已到");
     }
@@ -634,14 +647,8 @@ mod tests {
     #[test]
     fn virtual_clock_only_advances_by_sleep() {
         VIRTUAL_MILLIS.store(0, Ordering::SeqCst);
-        let _ = block_on_(FAKE_RT.timeout(
-            Duration::from_millis(3),
-            pending::<u8>(),
-        ));
-        let _ = block_on_(FAKE_RT.timeout(
-            Duration::from_millis(3),
-            pending::<u8>(),
-        ));
+        let _ = block_on_(FAKE_RT.timeout(Duration::from_millis(3), pending::<u8>()));
+        let _ = block_on_(FAKE_RT.timeout(Duration::from_millis(3), pending::<u8>()));
         assert_eq!(VIRTUAL_MILLIS.load(Ordering::SeqCst), 6);
     }
 
@@ -666,11 +673,8 @@ mod tests {
         fn assert_error_<E: core::error::Error>() {}
         assert_error_::<Elapsed>();
 
-        let elapsed = block_on_(FAKE_RT.timeout(
-            Duration::from_millis(1),
-            pending::<u8>(),
-        ))
-        .expect_err("期限已到应当是错误");
+        let elapsed = block_on_(FAKE_RT.timeout(Duration::from_millis(1), pending::<u8>()))
+            .expect_err("期限已到应当是错误");
         assert!(core::error::Error::source(&elapsed).is_none());
     }
 

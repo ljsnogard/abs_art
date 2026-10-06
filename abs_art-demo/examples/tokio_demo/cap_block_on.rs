@@ -84,9 +84,7 @@ fn main() {
     // 唯一感知后端的地方：创建 tokio 多线程运行时。
     // 用多线程（而非 current_thread）是因为 tokio 后端的 TrBlockOn 实现基于
     // block_in_place，而 block_in_place 不允许在 current_thread 运行时内使用。
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
     // 外层 rt.block_on 提供「运行时上下文」，并在此构造抽象层的运行时**值**；
     // 内层才是值上的 TrBlockOn 调用。

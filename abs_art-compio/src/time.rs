@@ -294,7 +294,10 @@ mod tests {
             let mut period = value.interval(Duration::from_secs(5));
             let started = Instant::now();
             period.tick().await;
-            assert!(started.elapsed() < Duration::from_secs(1), "首次 tick 应立即可用");
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "首次 tick 应立即可用"
+            );
 
             let out = value
                 .timeout(Duration::from_millis(1), async { 42u8 })

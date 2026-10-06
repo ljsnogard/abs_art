@@ -7,7 +7,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use abs_art::{runtime::TrJoinHandle, TrAsyncRuntime};
+use abs_art::{TrAsyncRuntime, runtime::TrJoinHandle};
 
 use crate::Runtime;
 
@@ -18,7 +18,10 @@ pub struct JoinHandle<T> {
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Tokio
@@ -100,8 +103,8 @@ mod tests {
     //! 针对 tokio 后端 `TrJoinHandle::detach` 的单元测试。
 
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     use abs_art::{TrJoinHandle, TrSpawnSend};
@@ -116,9 +119,7 @@ mod tests {
     /// 任务并置位。
     #[test]
     fn detach_keeps_task_running() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
         let flag = Arc::new(AtomicBool::new(false));
         let f = flag.clone();
 

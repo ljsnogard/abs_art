@@ -1,13 +1,16 @@
 //! `spawn_blocking`：把阻塞函数投递到 tokio 的阻塞线程池。
 
-use crate::{join_handle::JoinHandle, Runtime};
+use crate::{Runtime, join_handle::JoinHandle};
 use abs_art::{HasSpawnBlocking, TrSpawnBlocking};
 
 impl<const CAPS: usize> TrSpawnBlocking for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnBlocking,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     fn spawn_blocking<F, T>(&self, f: F) -> Self::JoinHandle<T>
     where
@@ -33,9 +36,7 @@ mod tests {
     /// 通过依据：JoinHandle 结果为 `Ok(40 + 2 == 42)`。
     #[test]
     fn spawn_blocking_returns_output() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
         let out = rt.block_on(async {
             let value = crate::current();

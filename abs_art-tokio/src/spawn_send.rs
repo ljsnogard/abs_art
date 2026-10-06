@@ -2,14 +2,17 @@
 
 use core::future::Future;
 
-use crate::{join_handle::JoinHandle, Runtime};
+use crate::{Runtime, join_handle::JoinHandle};
 use abs_art::{HasSpawnSend, TrSpawnSend};
 
 impl<const CAPS: usize> TrSpawnSend for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnSend,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
     where
@@ -35,9 +38,7 @@ mod tests {
     /// 通过依据：JoinHandle 结果为 `Ok(6 * 7 == 42)`。
     #[test]
     fn spawn_returns_output() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
         let out = rt.block_on(async {
             let value = crate::current();

@@ -19,7 +19,10 @@ impl<const CAPS: usize> TrSpawnBlocking for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnBlocking,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     /// 把阻塞函数 `f` 投递到 `blocking` 的进程级线程池，返回句柄。
     ///

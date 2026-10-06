@@ -124,10 +124,10 @@
 // 后端实例：demo-tokio / demo-compio 二选一（见 Cargo.toml 的 features）。
 // 两个分支都是 `pub use` 外部 crate 的重命名导入，把「当前后端的 bridge」
 // 统一暴露为 abs_art_bridge。
-#[cfg(feature = "demo-tokio")]
-pub use bridge_tokio as abs_art_bridge;
 #[cfg(feature = "demo-compio")]
 pub use bridge_compio as abs_art_bridge;
+#[cfg(feature = "demo-tokio")]
+pub use bridge_tokio as abs_art_bridge;
 
 // 互斥守卫：两个演示组同时启用 → 响亮报错（而不是静默选一个）。
 // bridge 内部对「backend 只能启用一个」还有一道 compile_error，这里先拦住。
@@ -151,8 +151,8 @@ compile_error!("abs_art-demo：必须启用 demo-tokio 或 demo-compio 之一（
 /// `TokioFull` / `CompioFull`。
 pub use abs_art_bridge::{
     BLOCK_ON, CLOCK, DELAY, FULL, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND,
-    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
-    TrSpawnBlocking, TrSpawnSend, TrTime,
+    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope, TrSpawnBlocking,
+    TrSpawnSend, TrTime,
 };
 
 // ── 后端相关的名字：用**具名别名**绑定到本 crate 的 demo-* 分组 ──────────
@@ -165,15 +165,13 @@ pub use abs_art_bridge::{
 /// 当前分组（tokio）的运行时与作用域类型（含具名别名）。
 #[cfg(feature = "demo-tokio")]
 pub use abs_art_bridge::{
-    TokioLocalScope, TokioLocalScope as LocalScope, TokioRuntime,
-    TokioRuntime as Runtime,
+    TokioLocalScope, TokioLocalScope as LocalScope, TokioRuntime, TokioRuntime as Runtime,
 };
 
 /// 当前分组（compio）的运行时与作用域类型（含具名别名）。
 #[cfg(feature = "demo-compio")]
 pub use abs_art_bridge::{
-    CompioLocalScope, CompioLocalScope as LocalScope, CompioRuntime,
-    CompioRuntime as Runtime,
+    CompioLocalScope, CompioLocalScope as LocalScope, CompioRuntime, CompioRuntime as Runtime,
 };
 
 /// 当前分组的**完整能力集**（按 `demo-*` 分组取具名常量）。
@@ -602,9 +600,7 @@ mod tests_tokio {
     /// 本测试将无法编译。
     #[test]
     fn borrow_block_on_works() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
         let out = rt.block_on(async {
             let value = BlockOnRt::current();
             sum_stack_data(&value)
@@ -623,9 +619,7 @@ mod tests_tokio {
     /// 的形状（无法为匿名 future 命名约束），本测试将无法编译。
     #[test]
     fn generic_bound_covers_multiple_futures() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
         let out = rt.block_on(async {
             let value = CapRt::current();
             generic_two_tasks(&value, 21)
@@ -668,9 +662,7 @@ mod tests_tokio {
     /// 内部本地任务不会被推进，测试将挂起。
     #[test]
     fn local_block_on_drives_queue() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
         let out = rt.block_on(async {
             let value = LocalRt::current();
             let scope = value.local_scope();
@@ -709,9 +701,7 @@ mod tests_tokio {
     /// 通过依据：返回 `2 * 285 == 570`。
     #[test]
     fn spawn_blocking_works() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
         let out = rt.block_on(async {
             let value = BlockingRt::current();
             blocking_pair(&value).await

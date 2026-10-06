@@ -53,8 +53,8 @@
 use std::time::Duration;
 
 use bridge_tokio::{
-    TokioFull, TokioRuntime as Runtime, RuntimeTag, TrAsyncRuntime, TrBlockOn, TrDelay, TrLocalScope,
-    TrSpawnBlocking, TrSpawnSend,
+    RuntimeTag, TokioFull, TokioRuntime as Runtime, TrAsyncRuntime, TrBlockOn, TrDelay,
+    TrLocalScope, TrSpawnBlocking, TrSpawnSend,
 };
 
 /// 能力声明：**tokio 后端的完整能力集** `TokioFull`（`63`，六位全置）。

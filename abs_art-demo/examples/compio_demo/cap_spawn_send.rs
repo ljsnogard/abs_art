@@ -133,12 +133,8 @@ fn main() {
         // （compio 不实现 TrSpawnSend）。
         // let _ = value.spawn(async { 1 });
 
-        let sum = scope
-            .run_until(local_concurrent_sum_(&scope, 7))
-            .await;
-        let panicked = scope
-            .run_until(local_panic_propagates_(&scope))
-            .await;
+        let sum = scope.run_until(local_concurrent_sum_(&scope, 7)).await;
+        let panicked = scope.run_until(local_panic_propagates_(&scope)).await;
         (sum, panicked)
     });
 

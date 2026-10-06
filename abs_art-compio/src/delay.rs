@@ -102,11 +102,7 @@ mod tests {
     fn delayed_runs_after_interval() {
         let rt = CompioRuntime::new().unwrap();
 
-        let out = rt.block_on(async {
-            delayed(Duration::from_millis(1), || 6 * 7)
-                .await
-                .unwrap()
-        });
+        let out = rt.block_on(async { delayed(Duration::from_millis(1), || 6 * 7).await.unwrap() });
 
         assert_eq!(out, 42);
     }

@@ -49,7 +49,10 @@ impl<const CAPS: usize> TrSpawnSend for Runtime<CAPS>
 where
     [(); CAPS]: HasSpawnSend,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     /// 把 `future` 投递到 smol 的**进程级**全局执行器，返回句柄。
     ///
@@ -70,8 +73,8 @@ mod tests {
     //! 针对 smol 后端的 `spawn_send` 功能单元测试。
 
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use abs_art::{FULL, TrSpawnSend};

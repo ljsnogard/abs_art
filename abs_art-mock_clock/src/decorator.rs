@@ -9,6 +9,7 @@ use abs_art::{
     TrSpawnSend, TrTime,
 };
 
+use crate::advance::MockAdvance;
 use crate::clock::{ManualClock, ManualClockApi};
 use crate::instant::MillisInstant;
 
@@ -73,6 +74,15 @@ impl<R, C: ManualClockApi> ManualTime<R, C> {
 }
 
 impl<R, C: ManualClockApi> TrMockClock for ManualTime<R, C> {
+    type Advance<'a>
+        = MockAdvance<C>
+    where
+        Self: 'a;
+    type AdvanceUntil<'a>
+        = MockAdvance<C>
+    where
+        Self: 'a;
+
     fn pause(&self) {
         self.clock_.set_frozen(true);
     }
@@ -85,12 +95,12 @@ impl<R, C: ManualClockApi> TrMockClock for ManualTime<R, C> {
         self.clock_.is_frozen()
     }
 
-    async fn advance(&self, by: Duration) {
-        self.clock_.advance_by(by);
+    fn advance(&self, by: Duration) -> Self::Advance<'_> {
+        MockAdvance::by_(self.clock_.clone(), by)
     }
 
-    async fn advance_until(&self, at: Self::Instant) {
-        self.clock_.advance_to(at);
+    fn advance_until(&self, at: Self::Instant) -> Self::AdvanceUntil<'_> {
+        MockAdvance::until_(self.clock_.clone(), at)
     }
 }
 

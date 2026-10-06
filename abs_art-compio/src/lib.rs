@@ -223,9 +223,9 @@ use core::fmt;
 use abs_art::RuntimeTag;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
-    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
-    TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
+    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout, TrAsyncRuntime,
+    TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle, TrLocalScope, TrSpawnBlocking,
+    TrSpawnSend, TrTime, UnitFuture,
 };
 
 pub mod caps;

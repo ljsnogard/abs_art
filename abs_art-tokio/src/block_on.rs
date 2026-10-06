@@ -64,9 +64,7 @@ mod tests {
     /// 且整个过程没有 panic。
     #[test]
     fn block_on_inside_runtime_returns_output() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
         let out = rt.block_on(async {
             let value = crate::current();
@@ -184,9 +182,7 @@ mod tests {
     /// impl 有误，将无法编译。
     #[test]
     fn tagged_runtime_implements_block_on() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .build()
-            .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
         let out = rt.block_on(async {
             let value = Runtime::<{ BLOCK_ON | SPAWN_SEND }>::current();

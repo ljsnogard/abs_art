@@ -102,9 +102,9 @@ use core::fmt;
 use abs_art::RuntimeTag;
 
 pub use abs_art::{
-    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout,
-    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle,
-    TrLocalScope, TrSpawnBlocking, TrSpawnSend, TrTime, UnitFuture,
+    BLOCK_ON, DELAY, Elapsed, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, Timeout, TrAsyncRuntime,
+    TrBlockOn, TrClock, TrDelay, TrInterval, TrJoinHandle, TrLocalScope, TrSpawnBlocking,
+    TrSpawnSend, TrTime, UnitFuture,
 };
 
 /// 本后端的**完整能力集**。
@@ -331,9 +331,7 @@ mod spawn_blocking;
 mod tests {
     //! 针对 tokio 后端**完整能力集常量**的单元测试。
 
-    use abs_art::{
-        HasBlockOn, HasClock, HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend,
-    };
+    use abs_art::{HasBlockOn, HasClock, HasDelay, HasSpawnBlocking, HasSpawnLocal, HasSpawnSend};
 
     use crate::FULL;
 
@@ -355,7 +353,11 @@ mod tests {
         fn assert_spawn_blocking<T: HasSpawnBlocking>() {}
         fn assert_clock<T: HasClock>() {}
 
-        assert_eq!(FULL, abs_art::FULL, "tokio 的完整能力集应与基础 crate 的全集同值");
+        assert_eq!(
+            FULL,
+            abs_art::FULL,
+            "tokio 的完整能力集应与基础 crate 的全集同值"
+        );
         assert_ne!(FULL & abs_art::CLOCK, 0, "本后端的完整能力集必须含 CLOCK");
 
         assert_block_on::<[(); FULL]>();

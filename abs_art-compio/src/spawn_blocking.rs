@@ -14,7 +14,10 @@ where
     [(); CAPS]: HasSpawnBlocking,
     [(); CAPS]: CompioCaps_,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     /// 把阻塞函数 `f` 投递到**本值抓住的** compio 运行时的阻塞线程池。
     ///

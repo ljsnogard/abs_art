@@ -70,9 +70,9 @@
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, CLOCK, DELAY, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
-    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
-    TrMockClock, TrSpawnBlocking, TrSpawnSend, TrTime,
+    BLOCK_ON, CLOCK, DELAY, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, TrAsyncRuntime,
+    TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope, TrMockClock, TrSpawnBlocking,
+    TrSpawnSend, TrTime,
 };
 
 // ── 「完整能力集」按**后端**给，而不是按位集合给 ───────────────────────────
@@ -380,7 +380,9 @@ pub use abs_art_smol::JoinHandle as SmolJoinHandle;
     feature = "backend-compio",
     feature = "backend-smol",
 )))]
-compile_error!("abs_art-bridge：必须启用一个 backend feature（backend-tokio / backend-compio / backend-smol）");
+compile_error!(
+    "abs_art-bridge：必须启用一个 backend feature（backend-tokio / backend-compio / backend-smol）"
+);
 
 // 守卫一：启用了多个 backend 却没声明默认 → 裸名会按优先级**悄悄**选一个，很可能是
 // 错的那个（`cargo test --workspace` 的 feature 并集尤其容易踩到）。这里让它编译失败。
@@ -420,10 +422,7 @@ mod tests_tokio_ {
     //! 缺省后端走，而 `cargo test --workspace` 会把 bridge 的 feature 取并集
     //! （缺省后端 + 下游所用的后端）。用别名之后，本模块无论缺省是谁都在测 tokio。
 
-    use super::{
-        BLOCK_ON, SPAWN_LOCAL, TokioRuntime as Runtime, TrLocalScope,
-        RuntimeTag,
-    };
+    use super::{BLOCK_ON, RuntimeTag, SPAWN_LOCAL, TokioRuntime as Runtime, TrLocalScope};
 
     /// 目的：验证桥接 crate 在启用 `backend-tokio` 时，`TokioRuntime` 与
     /// `TokioLocalScope` 确实解析为 tokio 后端的类型，且能力位与本地投递可用。
@@ -470,9 +469,7 @@ mod tests_compio_ {
     //!
     //! 与 tokio 模块同样用**具名别名** `CompioRuntime`，因此不受 bridge 缺省后端影响。
 
-    use super::{
-        BLOCK_ON, CompioRuntime as Runtime, RuntimeTag, SPAWN_LOCAL, TrLocalScope,
-    };
+    use super::{BLOCK_ON, CompioRuntime as Runtime, RuntimeTag, SPAWN_LOCAL, TrLocalScope};
 
     /// 目的：验证桥接 crate 在启用 `backend-compio` 时，`CompioRuntime` 与
     /// `CompioLocalScope` 解析正确，且本地投递可用。

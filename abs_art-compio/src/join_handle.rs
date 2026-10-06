@@ -26,7 +26,10 @@ impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS>
 where
     [(); CAPS]: CompioCaps_,
 {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Compio

@@ -53,7 +53,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use bridge_tokio::{TokioRuntime as Runtime, SPAWN_LOCAL, TrLocalScope};
+use bridge_tokio::{SPAWN_LOCAL, TokioRuntime as Runtime, TrLocalScope};
 
 /// 能力声明：本地投递**必须**被写下来（`SPAWN_LOCAL` 位）。
 ///
@@ -130,9 +130,7 @@ fn main() {
 
     // ---- B 部分：阻塞驱动（多线程运行时 + scope.block_on）----
     // tokio 的 TrLocalScope::block_on 基于 block_in_place，因此必须多线程。
-    let rt2 = tokio::runtime::Builder::new_multi_thread()
-        .build()
-        .unwrap();
+    let rt2 = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
     let out2 = rt2.block_on(async {
         let value = LocalRt::current();

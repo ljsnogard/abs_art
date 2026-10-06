@@ -19,7 +19,8 @@ delay + 装饰器 + 统一驱动），三个后端各以**可选 feature `mock-c
 ```text
 abs_art-mock_clock/
   src/instant.rs    MockInstant（扩展点）+ MillisInstant（内建，毫秒刻度）
-  src/clock.rs      ManualClockApi（扩展点）+ ManualClock（Arc<Mutex<_>>，到期唤醒表）
+  src/clock.rs      ManualClockApi（扩展点）+ ManualClock（Arc + 私有自旋锁，到期唤醒表）
+  src/advance.rs    MockAdvance（TrMockClock 的 GAT 返回类型）
   src/delay.rs      MockDelay（TrDelay::Delay）+ MockInterval（TrTime::Interval）
   src/decorator.rs  TrMockClock（扩展点）+ ManualTime<R, C>（装饰器）
   src/driver.rs     Supervisor（「空闲即推进」驱动 + 停滞即 panic）
@@ -42,8 +43,8 @@ where F: Future, C: abs_art_mock_clock::ManualClockApi
 
 | 决定 | 理由 |
 | --- | --- |
-| `ManualClock` 用 `Arc<Mutex<_>>`（而不是 `Rc<RefCell<_>>`） | 时钟能跨线程共享、可与后端 `spawn` 一起用；代价只是每次操作一次锁，而它是测试设施 |
-| 本 crate **依赖 std** | `Arc`/`Mutex`/`Waker` 直接可用；`no_std` 版可只替换共享状态那一层（`ManualClockApi` 是扩展点） |
+| `ManualClock` 用 `Arc` + **`atomic_sync` 的 `SpinningMutexOwned`** | 时钟能跨线程共享（`Send + Sync`），同时不依赖 std——见 §7 |
+| 本 crate 是 **`no_std`**（`core` + `alloc`） | 模拟时钟只依赖 `abs_art`；运行时是否依赖 std 与本 crate 无关——见 §7 |
 | 时刻类型内建 `MillisInstant`，把 `MockInstant` 留作扩展点 | 不把 `embedded-timers` 拉成依赖（本地 checkout、且会带进 `embedded-hal`/`nb`/`void`）；第三方（含 `Instant64<FREQ>`）实现 `MockInstant` 即可换时刻类型 |
 | tick 钩子是**闭包** `Fn() -> bool`，不是 trait | 后端 crate 无法为 `smol::LocalExecutor` / `compio::runtime::Runtime` 这类外来类型实现本 crate 的 trait（`E0117`，探针实测） |
 | 驱动挂在 `LocalScope` 上（而不是 `Runtime` 上） | 三后端的作用域都能拿到自己的执行器（tokio 的 `LocalSet`、compio 的 `Runtime`、smol 的 `LocalExecutor`），形状统一；而且「驱动队列」本来就是作用域的职责 |
@@ -148,3 +149,93 @@ pub trait TrMockClock: TrClock {
 
 `just test-mock-clock` → EXIT=0：`abs_art-mock_clock` 22 项 + 3 doctests；
 tokio 23 + 8 + 1；compio 28 + 13 + 4；smol 34 + 8 + 1。三后端本 crate 0 告警。
+
+---
+
+## 7. 同日修正（其二）：`no_std` 为主体 + `TrMockClock` 改 GAT
+
+### 7.1 `abs_art-mock_clock` 改成 `no_std`（`core` + `alloc`）
+
+- 去掉对 std 的全部依赖：`Arc` → `alloc::sync::Arc`、`Vec` → `alloc::vec::Vec`、
+  `Box` → `alloc::boxed::Box`、`Waker` → `core::task::Waker`、
+  `std::sync::Mutex` → **同仓库的 [`atomic_sync`] 的 `SpinningMutexOwned`**（`no_std`，
+  `mutex::preemptive`），而不是自己造一把锁——没必要重复发明 spinlock。
+  锁的用法是 `lock_session().lock().wait()`（`atomic_sync` 的守卫借用 `LockSession`，
+  因此改成闭包式 `with_(|inner| …)`，顺带保证**唤醒 waker 一定在锁外**）；
+  `wait()` 的 `Err`（取消令牌）在内部用不可取消令牌时不可达，用 `loop` 把 `Result`
+  收敛掉，库代码里不出现 `unwrap`/`expect`。
+- `#[cfg(test)] extern crate std;`：单元测试仍用 std（测试框架需要），但**库本体**不用。
+  非测试代码里 `grep "std::"` 已无命中。
+- 理由（你的判断）：模拟时钟只依赖 `abs_art`；运行时是不是实质上依赖 std，不该由
+  `abs_art-mock_clock` 关心。三个后端各自按需启用 `mock-clock` feature 即可。
+
+### 7.2 `abs_art::TrMockClock` 的返回类型：RPITIT → **GAT**
+
+```rust
+pub trait TrMockClock: TrClock {
+    type Advance<'a>: Future<Output = ()> where Self: 'a;
+    type AdvanceUntil<'a>: Future<Output = ()> where Self: 'a;
+    fn pause(&self);
+    fn resume(&self);
+    fn is_paused(&self) -> bool;
+    fn advance(&self, by: Duration) -> Self::Advance<'_>;
+    fn advance_until(&self, at: Self::Instant) -> Self::AdvanceUntil<'_>;
+}
+```
+
+理由：RPITIT 的不透明返回类型会把 auto trait（`Send` / `Sync`）对调用方**藏起来**，
+泛型代码里容易出现「编译器判不出这个 future 是不是 `Send`」。GAT 的返回类型是
+**实现方给出的具体类型**，`Send` 与否一眼可见。两个方法各一个关联类型，因为实现方
+常用两个不同的 `async` 块（本来就是两个不同的类型）。
+
+实现侧因此改用**具名 future**：本 crate 新增 [`MockAdvance`]（`src/advance.rs`），
+首次 poll 时推进（`advance` 推 `by`、`advance_until` 推绝对时刻）后立即完成。
+`Advance` / `AdvanceUntil` 都指向它，因此**不需要 `impl_trait_in_assoc_type`**（ITIT）
+这种 nightly 特性。
+
+顺带一个细节：`MockAdvance` 把绝对目标装在 `Box` 里，因为 `TrClock::Instant` 只保证
+`Copy + Ord + Add + Sub + 'static`，**不保证 `Unpin`**，而 `Pin::get_mut` 需要
+`Self: Unpin`；`Box<T>: Unpin` 无条件成立，用一次分配换掉一层额外约束
+（不愿为此给 `TrClock::Instant` 加 `Unpin`）。
+
+### 7.3 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test -p abs_art-mock_clock` | 25 单测（含并发推进不丢更新的用例）+ 3 doctests |
+| `just test-mock-clock` | **EXIT=0**（mock_clock 25+3；tokio 24+9+2；compio 31+16+10；smol 35+9+2） |
+| `cargo test --workspace` | **24 个目标全 ok、0 失败** |
+| clippy / doc | 各 crate 0 代码告警、0 断链 |
+
+未能实测：真 bare-metal target（本机只装了 `x86_64-unknown-linux-gnu`，无法 `--target`
+到 `thumbv7em-none-eabi`）。`#![no_std]` + 非测试代码无 `std::` 引用已经能保证库本体
+不依赖 std。
+
+### 7.4 追加：自旋锁改用 `atomic_sync`（不重复发明）
+
+按你的要求，删掉了我手写的 `src/sync.rs`（`AtomicBool` + `UnsafeCell` + 两处 `unsafe`），
+改为依赖同仓库的 `atomic_sync`（git source，分支 `dev/0.3.0`——与 `smux_v1` / `buffex`
+的写法一致）：
+
+```toml
+# abs_art/Cargo.toml（workspace）
+atomic_sync = { git = "https://gitee.com/lino_snsalias/atomic_sync.git", branch = "dev/0.3.0" }
+```
+
+```rust
+use atomic_sync::mutex::preemptive::SpinningMutexOwned;
+
+pub struct ManualClock<I: MockInstant = MillisInstant> {
+    inner_: Arc<SpinningMutexOwned<Inner_<I>>>,
+}
+```
+
+配套改动：
+
+- 锁的获取变成闭包式 `with_(|inner| …)`：`atomic_sync` 的 `MutexGuard` 借用
+  `LockSession`，无法从辅助函数里逃逸；闭包形式顺带把「**唤醒 waker 必须在锁外**」
+  这条纪律固定在类型上（`with_` 返回后才唤醒）。
+- 并发用例从「测锁」搬到「测时钟」：4 线程 × 5_000 次 `advance_by(1ms)`，断言最终恰好
+  20_000ms（读-改-写若未被保护就会变小）。
+- `atomic_sync` 也是 `#![no_std]`，因此 §7.1 的 no_std 结论不变；新增依赖的 git 源已在
+  本机 cargo 缓存里（`cargo check --offline` 通过）。

@@ -29,6 +29,8 @@ abs_art-compio = { path = "abs_art-compio" }
 abs_art-smol = { path = "abs_art-smol" }
 abs_art-bridge = { path = "abs_art-bridge" }
 abs_art-mock_clock = { path = "abs_art-mock_clock" }
+# 自旋锁：不重复发明，直接用同仓库的 atomic_sync（no_std，见 src/mutex/preemptive.rs）
+atomic_sync = { git = "https://gitee.com/lino_snsalias/atomic_sync.git", branch = "dev/0.3.0" }
 # 与运行时无关的消息通道：abs_art-smoke 的循环任务用例使用
 async-channel = { version = "2" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }

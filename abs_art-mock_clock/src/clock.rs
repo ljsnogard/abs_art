@@ -1,15 +1,17 @@
 //! 手动时钟：共享的时刻状态 + 到期唤醒表。
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
+use core::task::Waker;
 use core::time::Duration;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::Waker;
-use std::vec::Vec;
 
 use abs_art::{TrClock, TrInterval, TrMockClock};
+use atomic_sync::mutex::preemptive::SpinningMutexOwned;
 
+use crate::advance::MockAdvance;
 use crate::delay::{MockDelay, MockInterval};
 use crate::instant::{MillisInstant, MockInstant};
 
@@ -103,7 +105,7 @@ struct Inner_<I: MockInstant> {
 /// assert_eq!(clock.now().as_millis(), 3_000);
 /// ```
 pub struct ManualClock<I: MockInstant = MillisInstant> {
-    inner_: Arc<Mutex<Inner_<I>>>,
+    inner_: Arc<SpinningMutexOwned<Inner_<I>>>,
 }
 
 impl<I: MockInstant> Clone for ManualClock<I> {
@@ -122,12 +124,13 @@ impl<I: MockInstant> Default for ManualClock<I> {
 
 impl<I: MockInstant> fmt::Debug for ManualClock<I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = self.lock_();
-        f.debug_struct("ManualClock")
-            .field("now_millis", &inner.now_millis)
-            .field("frozen", &inner.frozen)
-            .field("timers", &inner.timers.len())
-            .finish()
+        self.with_(|inner| {
+            f.debug_struct("ManualClock")
+                .field("now_millis", &inner.now_millis)
+                .field("frozen", &inner.frozen)
+                .field("timers", &inner.timers.len())
+                .finish()
+        })
     }
 }
 
@@ -147,7 +150,7 @@ impl<I: MockInstant> ManualClock<I> {
     #[must_use]
     pub fn with_instant() -> Self {
         Self {
-            inner_: Arc::new(Mutex::new(Inner_ {
+            inner_: Arc::new(SpinningMutexOwned::new_owned(Inner_ {
                 now_millis: 0,
                 frozen: false,
                 timers: Vec::new(),
@@ -156,40 +159,51 @@ impl<I: MockInstant> ManualClock<I> {
         }
     }
 
-    /// 取内部锁；中毒时直接取回数据（本类型是测试设施，不因一次 panic 失效）。
-    fn lock_(&self) -> MutexGuard<'_, Inner_<I>> {
-        match self.inner_.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+    /// 在自旋锁保护的临界区里跑 `f`。
+    ///
+    /// 锁来自 `atomic_sync` 的 [`SpinningMutexOwned`]（`no_std`），而不是自造的锁：
+    /// 临界区只做内存操作（读/写时刻、推入/摘出 waker），因此自旋是合适的。
+    ///
+    /// 用闭包而不是返回守卫：`atomic_sync` 的守卫借用 `LockSession`，无法从本函数里
+    /// 逃逸出去；顺带保证**唤醒 waker 一定发生在锁外**（调用方在 `with_` 返回后再唤醒）。
+    fn with_<R>(&self, f: impl FnOnce(&mut Inner_<I>) -> R) -> R {
+        let mut session = self.inner_.lock_session();
+        // `wait()` 内部使用不可取消的令牌，`Err` 理论上不可达；这里用循环把 `Result`
+        // 收敛掉——既不在库代码里 `unwrap`/`expect`，也不会 panic。
+        let mut guard = loop {
+            match session.lock().wait() {
+                Ok(guard) => break guard,
+                Err(_) => continue,
+            }
+        };
+        f(&mut guard)
     }
 
     /// 当前时刻的毫秒刻度（内部用）。
     pub(crate) fn now_millis_(&self) -> u64 {
-        self.lock_().now_millis
+        self.with_(|inner| inner.now_millis)
     }
 
     /// 登记一个到期 waker（内部用）。
     pub(crate) fn register_(&self, deadline_millis: u64, waker: Waker) {
-        self.lock_().timers.push((deadline_millis, waker));
+        self.with_(|inner| inner.timers.push((deadline_millis, waker)));
     }
 
     /// 推进到下一个到期时刻并**在锁外**唤醒到期任务。
     fn jump_to_next_(&self) -> bool {
-        let due = {
-            let mut inner = self.lock_();
+        let due = self.with_(|inner| {
             let now = inner.now_millis;
-            let Some(next) = inner
+            let next = inner
                 .timers
                 .iter()
                 .map(|(deadline, _)| *deadline)
                 .filter(|deadline| *deadline > now)
-                .min()
-            else {
-                return false;
-            };
+                .min()?;
             inner.now_millis = next;
-            take_due_(&mut inner.timers, next)
+            Some(take_due_(&mut inner.timers, next))
+        });
+        let Some(due) = due else {
+            return false;
         };
         for waker in due {
             waker.wake();
@@ -199,12 +213,11 @@ impl<I: MockInstant> ManualClock<I> {
 
     /// 推进 `by` 毫秒并**在锁外**唤醒到期任务。
     fn jump_by_(&self, by_millis: u64) {
-        let due = {
-            let mut inner = self.lock_();
+        let due = self.with_(|inner| {
             inner.now_millis = inner.now_millis.saturating_add(by_millis);
             let now = inner.now_millis;
             take_due_(&mut inner.timers, now)
-        };
+        });
         for waker in due {
             waker.wake();
         }
@@ -235,6 +248,15 @@ impl<I: MockInstant> TrClock for ManualClock<I> {
 }
 
 impl<I: MockInstant> TrMockClock for ManualClock<I> {
+    type Advance<'a>
+        = MockAdvance<ManualClock<I>>
+    where
+        Self: 'a;
+    type AdvanceUntil<'a>
+        = MockAdvance<ManualClock<I>>
+    where
+        Self: 'a;
+
     fn pause(&self) {
         self.set_frozen(true);
     }
@@ -247,12 +269,12 @@ impl<I: MockInstant> TrMockClock for ManualClock<I> {
         self.is_frozen()
     }
 
-    async fn advance(&self, by: Duration) {
-        self.advance_by(by);
+    fn advance(&self, by: Duration) -> Self::Advance<'_> {
+        MockAdvance::by_(self.clone(), by)
     }
 
-    async fn advance_until(&self, at: Self::Instant) {
-        self.advance_to(at);
+    fn advance_until(&self, at: Self::Instant) -> Self::AdvanceUntil<'_> {
+        MockAdvance::until_(self.clone(), at)
     }
 }
 
@@ -262,13 +284,14 @@ impl<I: MockInstant> ManualClockApi for ManualClock<I> {
 
     fn next_deadline(&self) -> Option<Self::Instant> {
         let now = self.now_millis_();
-        let deadline = self
-            .lock_()
-            .timers
-            .iter()
-            .map(|(deadline, _)| *deadline)
-            .filter(|deadline| *deadline > now)
-            .min()?;
+        let deadline = self.with_(|inner| {
+            inner
+                .timers
+                .iter()
+                .map(|(deadline, _)| *deadline)
+                .filter(|deadline| *deadline > now)
+                .min()
+        })?;
         Some(I::from_millis(deadline))
     }
 
@@ -287,15 +310,17 @@ impl<I: MockInstant> ManualClockApi for ManualClock<I> {
     }
 
     fn is_frozen(&self) -> bool {
-        self.lock_().frozen
+        self.with_(|inner| inner.frozen)
     }
 
     fn set_frozen(&self, frozen: bool) {
-        self.lock_().frozen = frozen;
+        self.with_(|inner| inner.frozen = frozen);
     }
 
     fn sleep(&self, duration: Duration) -> Self::Delay {
-        let deadline = self.now_millis_().saturating_add(duration.as_millis() as u64);
+        let deadline = self
+            .now_millis_()
+            .saturating_add(duration.as_millis() as u64);
         MockDelay::new_(self.clone(), deadline)
     }
 
@@ -309,8 +334,8 @@ impl<I: MockInstant> ManualClockApi for ManualClock<I> {
 mod tests {
     //! [`ManualClock`] 的推进与唤醒语义。
 
+    use alloc::task::Wake;
     use core::time::Duration;
-    use std::task::Wake;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -449,6 +474,36 @@ mod tests {
         assert_eq!(clock.now().as_millis(), 30_000);
     }
 
+    /// 目的：验证时钟在多线程下互斥正确——并发推进不丢更新（锁由 `atomic_sync` 提供）。
+    ///
+    /// 手段：4 条线程各调 `advance_by(1ms)` 共 5_000 次。
+    ///
+    /// 判断：最终时刻恰为 20_000ms；若临界区没被正确保护，读-改-写会互相覆盖而使结果变小。
+    #[test]
+    fn concurrent_advance_does_not_lose_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        use crate::clock::ManualClockApi;
+
+        let clock = Arc::new(ManualClock::new());
+        let handles: std::vec::Vec<_> = (0..4)
+            .map(|_| {
+                let clock = Arc::clone(&clock);
+                thread::spawn(move || {
+                    for _ in 0..5_000 {
+                        clock.advance_by(Duration::from_millis(1));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("线程不应 panic");
+        }
+
+        assert_eq!(clock.now().as_millis(), 20_000);
+    }
+
     /// 目的：验证 `next_deadline` 只报「尚未到期」的最小截止时刻。
     ///
     /// 手段：登记 300ms 与 100ms 两个 waker，读 `next_deadline`。
@@ -459,8 +514,14 @@ mod tests {
         let clock = ManualClock::new();
         assert!(clock.next_deadline().is_none());
 
-        clock.register_(300, Arc::new(Counter_(Arc::new(AtomicUsize::new(0)))).into());
-        clock.register_(100, Arc::new(Counter_(Arc::new(AtomicUsize::new(0)))).into());
+        clock.register_(
+            300,
+            Arc::new(Counter_(Arc::new(AtomicUsize::new(0)))).into(),
+        );
+        clock.register_(
+            100,
+            Arc::new(Counter_(Arc::new(AtomicUsize::new(0)))).into(),
+        );
 
         assert_eq!(clock.next_deadline().map(|i| i.as_millis()), Some(100));
     }

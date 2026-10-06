@@ -1,5 +1,6 @@
 //! 统一驱动：把测试主体包一层「Pending 时 tick 执行器、推进时钟、自唤醒」。
 
+use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -105,6 +106,7 @@ impl<F: Future, C: ManualClockApi, T: Fn() -> bool> Future for Supervisor<F, C, 
 mod tests {
     //! [`Supervisor`] 的推进与死锁判定。
 
+    use alloc::string::{String, ToString};
     use core::future::pending;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};

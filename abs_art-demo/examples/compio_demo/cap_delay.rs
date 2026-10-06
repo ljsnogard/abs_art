@@ -45,7 +45,7 @@
 
 use std::time::{Duration, Instant};
 
-use bridge_compio::{CLOCK, DELAY, CompioRuntime as Runtime, TrClock, TrDelay};
+use bridge_compio::{CLOCK, CompioRuntime as Runtime, DELAY, TrClock, TrDelay};
 
 /// 能力声明：`DELAY | CLOCK` **两位**——`delay` 只要 `DELAY`，而 `now()` 要
 /// `CLOCK`（读时刻是独立的一位能力，不复用 `DELAY`）。

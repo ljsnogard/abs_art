@@ -81,7 +81,5 @@ fn main() {
 
     assert_eq!(local_out, 42, "delay + spawn_local + run_until");
     assert_eq!(local_tasks_out, 42, "7 + 14 + 21（本地作用域投递）");
-    println!(
-        "abs_art-demo (compio backend) OK: local={local_out}, local_tasks={local_tasks_out}"
-    );
+    println!("abs_art-demo (compio backend) OK: local={local_out}, local_tasks={local_tasks_out}");
 }

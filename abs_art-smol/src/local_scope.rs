@@ -107,7 +107,10 @@ impl fmt::Debug for LocalScope {
 impl TrLocalScope for LocalScope {
     /// 与全局 `spawn` / `spawn_blocking` 共用同一个 [`JoinHandle`]（它只是
     /// `smol::Task` 的薄包装，**不持有队列**）。
-    type Handle<T> = JoinHandle<T> where T: 'static;
+    type Handle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     /// 把 `future` 投递到本作用域的本地队列。
     ///

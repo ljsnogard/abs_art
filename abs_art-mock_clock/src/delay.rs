@@ -2,8 +2,8 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::task::Waker;
 use core::task::{Context, Poll};
-use std::task::Waker;
 
 use abs_art::TrInterval;
 

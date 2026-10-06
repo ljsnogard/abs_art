@@ -55,13 +55,21 @@
 //!
 //! # 平台
 //!
-//! 本 crate 目前**依赖 std**（`Arc` + `Mutex` + `Waker`）：它是测试设施，而
-//! `Arc<Mutex<_>>` 让手动时钟能跨线程共享、可与各后端的 `spawn` 一起用。
-//! 需要 no_std 时，可以只替换共享状态那一层（[`ManualClockApi`] 是扩展点）。
+//! 本 crate 是 **`no_std`** 的：只用 `core` + `alloc`（`alloc::sync::Arc` 共享时钟、
+//! `alloc::vec::Vec` 存到期表），互斥用同仓库的 [`atomic_sync`]（`no_std` 的
+//! `SpinningMutexOwned`）而不是自己造锁。模拟时钟只依赖 `abs_art` 与 `atomic_sync`；
+//! 运行时是否实质上依赖 std，与本 crate 无关——三个后端各自按需选用本 crate 即可。
 
+#![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
+
+pub mod advance;
 pub mod clock;
 pub mod decorator;
 pub mod delay;
@@ -72,6 +80,7 @@ pub mod instant;
 mod support_;
 
 pub use abs_art::TrMockClock;
+pub use advance::MockAdvance;
 pub use clock::{ManualClock, ManualClockApi};
 pub use decorator::ManualTime;
 pub use delay::{MockDelay, MockInterval};

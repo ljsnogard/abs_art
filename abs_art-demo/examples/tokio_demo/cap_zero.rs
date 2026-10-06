@@ -34,7 +34,7 @@
 //!   `current()` 需要 `Handle::current()`，见 `strict_mode_check` 的
 //!   `no_context_construction`。
 
-use bridge_tokio::{TokioRuntime as Runtime, RuntimeTag, TrAsyncRuntime};
+use bridge_tokio::{RuntimeTag, TokioRuntime as Runtime, TrAsyncRuntime};
 
 /// 零能力声明：这个值不承诺任何运行时能力。
 type ZeroRt = Runtime<0>;

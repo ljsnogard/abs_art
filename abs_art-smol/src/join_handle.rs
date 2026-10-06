@@ -8,7 +8,7 @@ use core::{
     task::{Context, Poll},
 };
 
-use abs_art::{runtime::TrJoinHandle, TrAsyncRuntime};
+use abs_art::{TrAsyncRuntime, runtime::TrJoinHandle};
 
 use crate::Runtime;
 
@@ -52,7 +52,10 @@ where
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
-    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+    type JoinHandle<T>
+        = JoinHandle<T>
+    where
+        T: 'static;
 
     fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Smol
@@ -139,8 +142,8 @@ mod tests {
     fn detach_keeps_task_running_after_value_is_dropped() {
         use std::{
             sync::{
-                atomic::{AtomicBool, Ordering},
                 Arc,
+                atomic::{AtomicBool, Ordering},
             },
             time::{Duration, Instant},
         };

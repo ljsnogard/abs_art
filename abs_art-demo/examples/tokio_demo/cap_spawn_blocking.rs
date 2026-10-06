@@ -33,7 +33,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bridge_tokio::{BLOCK_ON, TokioRuntime as Runtime, SPAWN_BLOCKING, TrBlockOn, TrSpawnBlocking};
+use bridge_tokio::{BLOCK_ON, SPAWN_BLOCKING, TokioRuntime as Runtime, TrBlockOn, TrSpawnBlocking};
 
 /// 能力声明：`block_on` + `spawn_blocking`。
 type BlockingRt = Runtime<{ BLOCK_ON | SPAWN_BLOCKING }>;
@@ -65,9 +65,7 @@ async fn blocking_plus_async_(rt: &BlockingRt) -> (usize, usize) {
 }
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().build().unwrap();
 
     let (sum, count) = rt.block_on(async {
         // 在运行时上下文内构造值；块内在同一个值上 block_on 聚合 future
