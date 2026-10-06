@@ -1,7 +1,9 @@
 //! 手动时钟的时刻类型：把「毫秒刻度」映射到具体类型（可扩展）。
 
-use core::ops::{Add, Sub};
-use core::time::Duration;
+use core::{
+    ops::{Add, Sub},
+    time::Duration,
+};
 
 /// 手动时钟的时刻类型。
 ///

@@ -346,8 +346,7 @@ impl LocalScope {
 mod mock_clock_tests_ {
     //! tokio 后端接上手动时钟之后的虚拟时间行为。
 
-    use std::rc::Rc;
-    use std::time::Duration;
+    use std::{rc::Rc, time::Duration};
 
     use abs_art::{TrClock, TrDelay, TrLocalScope};
     use abs_art_mock_clock::{ManualClock, ManualTime, MockInstant};

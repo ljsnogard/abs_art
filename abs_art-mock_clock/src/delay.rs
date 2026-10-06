@@ -1,14 +1,14 @@
 //! 手动时钟上的 delay 与周期源。
 
-use core::future::Future;
-use core::pin::Pin;
-use core::task::Waker;
-use core::task::{Context, Poll};
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
 use abs_art::TrInterval;
 
-use crate::clock::ManualClock;
-use crate::instant::MockInstant;
+use crate::{clock::ManualClock, instant::MockInstant};
 
 /// 手动时钟上的 delay future（即 [`crate::ManualClockApi::Delay`]）。
 ///
@@ -109,10 +109,12 @@ impl<I: MockInstant> TrInterval for MockInterval<I> {
 mod tests {
     //! [`MockDelay`] / [`MockInterval`] 的行为。
 
-    use core::future::Future;
-    use core::pin::pin;
-    use core::task::{Context, Poll, Waker};
-    use core::time::Duration;
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
 
     use abs_art::TrInterval;
 

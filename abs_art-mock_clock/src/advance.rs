@@ -1,10 +1,12 @@
 //! 手动时钟的推进 future。
 
 use alloc::boxed::Box;
-use core::future::Future;
-use core::pin::Pin;
-use core::task::{Context, Poll};
-use core::time::Duration;
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use crate::clock::ManualClockApi;
 
@@ -79,15 +81,16 @@ impl<C: ManualClockApi> Future for MockAdvance<C> {
 mod tests {
     //! [`MockAdvance`] 的行为。
 
-    use core::future::Future;
-    use core::pin::pin;
-    use core::task::{Context, Poll, Waker};
-    use core::time::Duration;
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
 
     use abs_art::{TrClock, TrMockClock};
 
-    use crate::clock::ManualClock;
-    use crate::instant::MockInstant;
+    use crate::{clock::ManualClock, instant::MockInstant};
 
     /// 目的：验证推进发生在**被 poll** 时，而不是构造 future 时。
     ///

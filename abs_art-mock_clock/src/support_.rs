@@ -1,10 +1,12 @@
 //! 测试替身：一个最小的「运行时 + join handle」，供本 crate 的单元测试使用。
 
-use core::cell::Cell;
-use core::fmt;
-use core::future::Future;
-use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::{
+    cell::Cell,
+    fmt,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use abs_art::{RuntimeTag, TrAsyncRuntime, TrJoinHandle};
 

@@ -25,9 +25,7 @@
 //! 立刻在本线程用它投递与驱动」。本骨架不仅挡「宿主被永久阻塞」，也顺带保证了
 //! 「本地队列不跨线程」这条结构约束不会被无声违反。
 
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::{sync::mpsc, thread, time::Duration};
 
 /// 单个用例的超时上限。
 ///

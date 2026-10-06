@@ -1,19 +1,16 @@
 //! 手动时钟：共享的时刻状态 + 到期唤醒表。
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::fmt;
-use core::future::Future;
-use core::marker::PhantomData;
-use core::task::Waker;
-use core::time::Duration;
+use alloc::{sync::Arc, vec::Vec};
+use core::{fmt, future::Future, marker::PhantomData, task::Waker, time::Duration};
 
 use abs_art::{TrClock, TrInterval, TrMockClock};
 use atomic_sync::mutex::preemptive::SpinningMutexOwned;
 
-use crate::advance::MockAdvance;
-use crate::delay::{MockDelay, MockInterval};
-use crate::instant::{MillisInstant, MockInstant};
+use crate::{
+    advance::MockAdvance,
+    delay::{MockDelay, MockInterval},
+    instant::{MillisInstant, MockInstant},
+};
 
 /// 手动时钟的**机制**接口——扩展点。
 ///
@@ -336,8 +333,10 @@ mod tests {
 
     use alloc::task::Wake;
     use core::time::Duration;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use abs_art::TrClock;
 
@@ -428,9 +427,11 @@ mod tests {
     /// 判断：poll 前为 0ms，poll 返回 `Ready` 后为 7000ms。
     #[test]
     fn async_advance_advances_when_polled() {
-        use core::future::Future;
-        use core::pin::pin;
-        use core::task::{Context, Poll, Waker};
+        use core::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
 
         use abs_art::TrMockClock;
 
@@ -451,9 +452,11 @@ mod tests {
     /// 判断：分别停在 10s 与 30s。
     #[test]
     fn advance_until_never_goes_backwards() {
-        use core::future::Future;
-        use core::pin::pin;
-        use core::task::{Context, Poll, Waker};
+        use core::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
 
         use abs_art::TrMockClock;
 
@@ -481,8 +484,7 @@ mod tests {
     /// 判断：最终时刻恰为 20_000ms；若临界区没被正确保护，读-改-写会互相覆盖而使结果变小。
     #[test]
     fn concurrent_advance_does_not_lose_updates() {
-        use std::sync::Arc;
-        use std::thread;
+        use std::{sync::Arc, thread};
 
         use crate::clock::ManualClockApi;
 

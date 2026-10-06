@@ -32,8 +32,7 @@
 //! - [`probe_c_detach_survives`]：`detach()` 之后循环仍须被调度。
 
 use core::array::from_fn;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use abs_art::{TrJoinHandle, TrLocalScope};
 use async_channel::unbounded;

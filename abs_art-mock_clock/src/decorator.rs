@@ -1,17 +1,17 @@
 //! 装饰器：把任意运行时值的**时间**换成手动时钟，其余能力原样委托。
 
-use core::fmt;
-use core::future::Future;
-use core::time::Duration;
+use core::{fmt, future::Future, time::Duration};
 
 use abs_art::{
     RuntimeTag, TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrMockClock, TrSpawnBlocking,
     TrSpawnSend, TrTime,
 };
 
-use crate::advance::MockAdvance;
-use crate::clock::{ManualClock, ManualClockApi};
-use crate::instant::MillisInstant;
+use crate::{
+    advance::MockAdvance,
+    clock::{ManualClock, ManualClockApi},
+    instant::MillisInstant,
+};
 
 /// 把 `inner` 的时间换成 `clock` 的装饰器。
 ///
@@ -195,9 +195,11 @@ mod tests {
     use abs_art::{RuntimeTag, TrAsyncRuntime, TrClock, TrDelay, TrInterval, TrTime};
 
     use super::ManualTime;
-    use crate::clock::{ManualClock, ManualClockApi};
-    use crate::instant::MockInstant;
-    use crate::support_::FakeRt_;
+    use crate::{
+        clock::{ManualClock, ManualClockApi},
+        instant::MockInstant,
+        support_::FakeRt_,
+    };
 
     /// 目的：验证装饰器的时间来自手动时钟（而非 inner），身份则委托给 inner。
     ///
@@ -222,9 +224,11 @@ mod tests {
     /// 判断：初始 `Pending`；`advance(100ms)` 后 `Ready`。
     #[test]
     fn delay_is_driven_by_the_manual_clock() {
-        use core::future::Future;
-        use core::pin::pin;
-        use core::task::{Context, Poll, Waker};
+        use core::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
 
         let clock = ManualClock::new();
         let value = ManualTime::new(FakeRt_, clock.clone());
@@ -244,9 +248,11 @@ mod tests {
     /// 判断：立即 `Ready`。
     #[test]
     fn interval_comes_from_the_manual_clock() {
-        use core::future::Future;
-        use core::pin::pin;
-        use core::task::{Context, Poll, Waker};
+        use core::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
 
         let clock = ManualClock::new();
         let value = ManualTime::new(FakeRt_, clock.clone());

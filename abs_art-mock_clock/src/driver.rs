@@ -1,9 +1,11 @@
 //! 统一驱动：把测试主体包一层「Pending 时 tick 执行器、推进时钟、自唤醒」。
 
 use alloc::boxed::Box;
-use core::future::Future;
-use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::clock::ManualClockApi;
 
@@ -107,19 +109,23 @@ mod tests {
     //! [`Supervisor`] 的推进与死锁判定。
 
     use alloc::string::{String, ToString};
-    use core::future::pending;
-    use core::pin::pin;
-    use core::task::{Context, Poll, Waker};
-    use core::time::Duration;
+    use core::{
+        future::pending,
+        pin::pin,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use abs_art::{TrClock, TrDelay};
 
     use super::Supervisor;
-    use crate::clock::{ManualClock, ManualClockApi};
-    use crate::decorator::ManualTime;
-    use crate::instant::MockInstant;
-    use crate::support_::FakeRt_;
+    use crate::{
+        clock::{ManualClock, ManualClockApi},
+        decorator::ManualTime,
+        instant::MockInstant,
+        support_::FakeRt_,
+    };
 
     /// 目的：验证驱动会把主体推进到 delay 到期（无需任何真实运行时）。
     ///

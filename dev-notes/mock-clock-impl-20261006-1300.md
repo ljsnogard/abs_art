@@ -239,3 +239,51 @@ pub struct ManualClock<I: MockInstant = MillisInstant> {
   20_000ms（读-改-写若未被保护就会变小）。
 - `atomic_sync` 也是 `#![no_std]`，因此 §7.1 的 no_std 结论不变；新增依赖的 git 源已在
   本机 cargo 缓存里（`cargo check --offline` 通过）。
+
+---
+
+## 8. `use` 语句规范整理（AGENTS.md §5）
+
+规则原文：*「使用 `use` 语句导入依赖时，所有外部 crate（包括 core 和 std）必须以独立单根
+形式出现且只出现一次」*。`cargo fmt` **不管这条**（rustfmt 的 import granularity 默认是
+`Preserve`：它只排版，不合并），所以必须结构化重写。
+
+整理后的形态（`abs_art-mock_clock` 全部 8 个文件；每个作用域里每个 crate 根只出现一次，
+路径按树嵌套）：
+
+```rust
+// 之前：同一根散成多条
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt;
+use core::future::Future;
+use core::task::Waker;
+
+// 之后
+use alloc::{sync::Arc, vec::Vec};
+use core::{fmt, future::Future, task::Waker, time::Duration};
+
+use abs_art::{TrClock, TrInterval, TrMockClock};
+use atomic_sync::mutex::preemptive::SpinningMutexOwned;
+
+use crate::{
+    advance::MockAdvance,
+    delay::{MockDelay, MockInterval},
+    instant::{MillisInstant, MockInstant},
+};
+```
+
+做法：先用手写脚本按「crate 根 + 路径树」合并（`::` 只在顶层切分，`{...}` 组递归展开，
+同根同子路径再合并），**只用 rustfmt 做排版**；随后用一个校验器逐块断言「根唯一 + 展开后
+无重复路径」。留意两个坑：
+
+1. 只按「根」合并不够——`task::Waker, task::{Context, Poll}` 属于同根下的重复子路径，
+   rustfmt 也不会替你合并；
+2. 朴素地按 `::` 切分会把 `{...}` 内部的 `::` 也切开（我第一版就踩了，合并等于没做）。
+
+顺带把全 workspace 扫了一遍，另有 4 处同类违规（同一条规则）一并整理：
+`abs_art-compio/src/time.rs`、`abs_art-tokio/src/local_scope.rs`、
+`abs_art-smoke/src/probe.rs`、`abs_art-smoke/src/harness.rs`。现在整个 workspace 合规。
+
+验证：`cargo test --workspace`（24 目标 ok / 0 失败）、`just test-mock-clock`（11 目标 ok）、
+clippy 0 代码告警、`cargo fmt --all -- --check` 干净、`cargo doc` 0 断链。

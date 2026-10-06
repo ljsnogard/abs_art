@@ -171,8 +171,7 @@ mod tests {
     use core::time::Duration;
     // 本 crate 是 `no_std`，`core` 的 prelude 里没有 `ToString`；经
     // `extern crate std;` 取它，免得为了断言文案引入 `alloc`。
-    use std::string::ToString;
-    use std::time::Instant;
+    use std::{string::ToString, time::Instant};
 
     use abs_art::{TrClock, TrDelay, TrInterval, TrTime};
 
