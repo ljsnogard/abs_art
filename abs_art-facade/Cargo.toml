@@ -1,0 +1,35 @@
+[package]
+name = "abs_art-facade"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Runtime backend facade for the abs_art family: the single place that resolves the selected backend"
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+abs_art = { path = "../abs_art", version = "0.3.0" }
+# **全家族唯一一条连 `abs_art-bridge` 的边**：关掉 bridge 的缺省 feature，后端选择完全
+# 交给下面的 `rt-*`。bridge 自己的 `default` 保持不动——它单独编译仍然可用。
+abs_art-bridge = { path = "../abs_art-bridge", version = "0.3.0", default-features = false }
+# 虚拟（手动）时钟：`ManualTime` 的 `ScopeHost` 委托实现只能写在拥有该 trait 的本 crate
+# （孤儿规则），因此它作为可选依赖出现在这里，生产依赖图里不出现。
+abs_art-mock_clock = { path = "../abs_art-mock_clock", version = "0.3.0", optional = true }
+
+[features]
+# 「当前后端」由本 crate 三选一。映射是**非对称**的，这是刻意的：
+#
+# - `rt-compio` 只**链接**裸 backend（不占「默认」位）；
+# - `rt-tokio` / `rt-smol` 用 `default-backend-*` **显式声明默认**。
+#
+# 于是：门面单独编译（默认 rt-compio）时「唯一 backend 即默认」，编得过；下游叠加
+# `rt-tokio` 时全图仍只有一个 `default-backend-*`，裸名变 tokio，既不撞 bridge 的
+# 「多默认」守卫，也**不需要**写 `default-features = false`。想少链一个 compio 的
+# 下游可以写 `default-features = false, features = ["rt-tokio"]`——那是可选优化。
+default = ["rt-compio"]
+rt-compio = ["abs_art-bridge/backend-compio"]
+rt-smol = ["abs_art-bridge/default-backend-smol"]
+rt-tokio = ["abs_art-bridge/default-backend-tokio"]
+mock-clock = ["dep:abs_art-mock_clock"]

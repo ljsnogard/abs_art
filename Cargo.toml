@@ -5,6 +5,7 @@ members = [
     "abs_art-compio",
     "abs_art-smol",
     "abs_art-bridge",
+    "abs_art-facade",
     "abs_art-smoke",
     "abs_art-mock_clock",
 ]
@@ -27,6 +28,7 @@ abs_art-tokio = { path = "abs_art-tokio" }
 abs_art-compio = { path = "abs_art-compio" }
 abs_art-smol = { path = "abs_art-smol" }
 abs_art-bridge = { path = "abs_art-bridge" }
+abs_art-facade = { path = "abs_art-facade" }
 abs_art-mock_clock = { path = "abs_art-mock_clock" }
 # 自旋锁：不重复发明，直接用同仓库的 atomic_sync（no_std，见 src/mutex/preemptive.rs）
 atomic_sync = { git = "https://gitee.com/lino_snsalias/atomic_sync.git", branch = "dev/0.3.0" }
