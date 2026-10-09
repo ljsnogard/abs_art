@@ -77,9 +77,9 @@
 extern crate std;
 
 pub use abs_art::{
-    BLOCK_ON, CLOCK, DELAY, RuntimeTag, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, TrAsyncRuntime,
-    TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope, TrMockClock, TrSpawnBlocking,
-    TrSpawnSend, TrTime,
+    BLOCK_ON, CLOCK, DELAY, SPAWN_BLOCKING, SPAWN_LOCAL, SPAWN_SEND, RuntimeTag,
+    TrAsyncRuntime, TrBlockOn, TrClock, TrDelay, TrJoinHandle, TrLocalScope,
+    TrMockClock, TrSpawnBlocking, TrSpawnSend, TrTime,
 };
 
 // ── 「完整能力集」按**后端**给，而不是按位集合给 ───────────────────────────

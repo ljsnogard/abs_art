@@ -34,8 +34,8 @@
 //! [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL)）——作用域不会脱离运行时值凭空出现，
 //! 构造入口**不公开**。
 
-use alloc::rc::Rc;
 use core::{fmt, future::Future, time::Duration};
+use std::rc::Rc;
 
 use abs_art::TrLocalScope;
 
