@@ -35,18 +35,25 @@
 //!
 //! # D 用例：阻塞与驱动是两件事，必须显式组合
 //!
-//! 本轮把「作用域的阻塞入口」**从 trait 上删掉了**：tokio 的 `block_in_place` 在
-//! `LocalSet` 内被 tokio 自己禁止（源码注释：「in a LocalSet, where it is _not_ okay
-//! to block」），于是「`scope.block_on(f)`」在三个后端上分别是 panic / 只驱动自己那条
-//! 队列 / 顺带驱动整个运行时——同一个名字三种承诺。抽象层只保留：
+//! 早先那条「作用域的阻塞入口」`TrLocalScope::block_on` 已被删除：tokio 的
+//! `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止（源码注释：「in a LocalSet,
+//! where it is _not_ okay to block」），于是「`scope.block_on(f)`」在三个后端上分别是
+//! panic / 只驱动自己那条队列 / 顺带驱动整个运行时——同一个名字三种承诺。抽象层保留了
+//! 两个**不同**的东西：
 //!
 //! - [`TrLocalScope::run_until`]（宿主是**作用域**）：**驱动本线程队列**直到传入的
 //!   future 完成；
 //! - [`TrBlockOn::block_on`]（宿主是**运行时值**）：只阻塞等待，**不驱动任何本地队列**。
 //!
-//! D 用例因此改为把两者**组合**起来用：`value.block_on(scope.run_until(probe))`。它的
-//! 判定标准不变（把探针 A 的 `42` 交回上层），但证据更精确：只 `value.block_on(probe)`
-//! 会挂起，正因为 `block_on` 自己不驱动队列。
+//! D 用例把两者**组合**起来用：`value.block_on(scope.run_until(probe))`。它的判定标准
+//! 不变（把探针 A 的 `42` 交回上层），证据却更精确：只 `value.block_on(probe)` 会挂起，
+//! 正因为 `block_on` 自己不驱动队列。
+//!
+//! > 后来抽象层又补回了「阻塞 + 驱动队列」，但**换了机制**：
+//! > [`TrLocalScope::block_on_local`] 不使用任何运行时阻塞原语（tokio / smol 是
+//! > 「驱动队列 + 纯 park」，compio 是自己 tick），因此可以在本地队列的驱动栈内调用。
+//! > 它的契约测试在三个后端各自的 `local_scope` 单测里，不在本文件（本文件的 D 继续
+//! > 守住「组合写法」这条既有证据）。
 //!
 //! # `TrSpawnSend` 在矩阵里的位置：compio **不**实现它
 //!
@@ -212,9 +219,11 @@ fn tokio_c_detach_survives() {
 /// 通过依据：交回 `42`。若组合里漏掉 `run_until`（只 `value.block_on(probe)`），投递
 /// 出去的 `!Send` 任务永远不会被推进，await 句柄会挂起，由 `run_case` 的超时判失败。
 ///
-/// 说明：抽象层的作用域上**没有**阻塞入口（tokio 的 `block_in_place` 在 `LocalSet`
-/// 内被 tokio 自己禁止，三后端对「`scope.block_on`」给不出同一个承诺），因此原来那条
-/// 「作用域阻塞入口」用例已改为本用例。
+/// 说明：早先那条作用域阻塞入口 `TrLocalScope::block_on` 已删除（tokio 的
+/// `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止，三后端对「`scope.block_on`」
+/// 给不出同一个承诺），本用例因此改为测「组合写法」。后来补回的
+/// `TrLocalScope::block_on_local` 走的是**另一套机制**，由三个后端的 `local_scope`
+/// 单测覆盖，不在本文件里。
 #[test]
 fn tokio_d_blocking_combo() {
     assert_a(

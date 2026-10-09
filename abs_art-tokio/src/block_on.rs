@@ -23,10 +23,10 @@ where
     /// 在别的线程上承接）。
     ///
     /// 本方法**不涉及本地队列**（队列不归运行时值所有、也不由本方法驱动）：需要
-    /// 「等待期间继续驱动本线程的本地队列」时，把作用域的
-    /// [`TrLocalScope::run_until`](abs_art::TrLocalScope::run_until) 交给一个正在跑的
-    /// 驱动源去 await。注意本方法内部走 `block_in_place`，而 tokio **禁止**在 `LocalSet`
-    /// 内调用它——所以「作用域的阻塞入口」已从抽象层删除。
+    /// 「等待期间继续驱动本线程的本地队列」时用作用域的
+    /// [`TrLocalScope::block_on_local`](abs_art::TrLocalScope::block_on_local)——它自己驱动
+    /// 队列，不借运行时的阻塞原语。注意本方法内部走 `block_in_place`，而 tokio **禁止**
+    /// 在 `LocalSet` 内调用它（因此与 `run_until` 的「组合写法」在本地驱动栈内也不成立）。
     ///
     /// # Panics
     ///

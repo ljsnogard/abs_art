@@ -50,20 +50,26 @@
 //! [`TrBlockOn`] + [`TrDelay`] / [`TrTime`] / [`TrClock`] + [`TrSpawnBlocking`] +
 //! [`TrLocalScope`]。
 //!
-//! 本地投递（`!Send` 任务）需要一个**本线程队列的别名**，由运行时值交出。阻塞与
-//! 驱动队列是**两件事**（作用域上不再有阻塞入口），组合起来才既等待又推进队列：
+//! 本地投递（`!Send` 任务）需要一个**本线程队列的别名**，由运行时值交出。需要
+//! 「同步等到 future 完成、同时不饿死本地队列」时，用作用域自己的
+//! [`TrLocalScope::block_on_local`]：
 //!
 //! ```no_run
-//! use abs_art_bridge::{FULL, Runtime, TrBlockOn, TrLocalScope};
+//! use abs_art_bridge::{FULL, Runtime, TrLocalScope};
 //!
 //! let rt = Runtime::<{ FULL }>::current();
 //! let scope = rt.local_scope();           // 要求 CAPS 含 SPAWN_LOCAL
-//! let out = rt.block_on(scope.run_until(async {
+//! let out = scope.block_on_local(async {
 //!     let rc = std::rc::Rc::new(1u32);    // !Send：只有本地队列能承载
 //!     scope.spawn_local(async move { *rc }).await.unwrap()
-//! }));
+//! });
 //! # let _ = out;
 //! ```
+//!
+//! 它**不使用**运行时的阻塞原语（tokio 的 `block_in_place` 在 `LocalSet` 内被禁止），
+//! 而是自己驱动本线程队列；与 [`TrBlockOn::block_on`] 的分工、以及各后端的边界见该
+//! 方法的文档。外层已经有正在跑的驱动源时，也可以照旧写
+//! `rt.block_on(scope.run_until(f))` 或直接 `scope.run_until(f).await`。
 
 #![no_std]
 

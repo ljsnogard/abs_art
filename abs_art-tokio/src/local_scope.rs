@@ -26,23 +26,82 @@
 //! 语义（见 [`TrLocalScope`]）。tokio 允许多个 `LocalSet`
 //! 并存这件事在本后端不暴露——`local_scope()` 永远交出同一条。
 //!
-//! # 只提供 `run_until`，没有阻塞入口
+//! # 阻塞入口：`block_on_local` 用「驱动队列 + 纯 park」
 //!
-//! tokio 的 `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止（`worker.rs` 的注释：
-//! 「in a LocalSet, where it is _not_ okay to block」），所以「阻塞等待并驱动本地
-//! 队列」在本后端根本立不住，抽象层因此把阻塞入口从 [`TrLocalScope`] 上删掉了。
-//! 需要阻塞等待时用运行时值的
-//! [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on)——但它**不驱动本地队列**。
+//! tokio 的 `block_in_place` 在 `LocalSet` 内被禁止（`worker.rs` 的注释：
+//! 「in a LocalSet, where it is _not_ okay to block」），所以本后端**不能**借运行时的
+//! 阻塞原语来实现「同步等待 + 驱动本地队列」。可行的做法是把职责反过来分：
+//!
+//! - **驱动队列**交给 `LocalSet::run_until`（它本来就允许嵌套在本地驱动栈内）；
+//! - **等待唤醒**交给一个纯 park 执行器（[`park_on_`]：只 poll + `park_timeout`），
+//!   它不进入任何运行时上下文、也不接管队列。
+//!
+//! 两者拼起来就是 [`TrLocalScope::block_on_local`]。
+//!
+//! **边界一（IO）**：park 期间本线程不再推进 tokio 的 IO driver（它依附 `block_on`），
+//! 因此本线程若还负责某个 socket 的 IO 就会停摆——调用方要把「驱动连接」与「同步等待」
+//! 分到不同线程（见 `mptp_cs_demo` 的宿主线程形态）。
+//!
+//! **边界二（`current_thread` 运行时）**：实测表明，在 `current_thread` 运行时下由外部
+//! park 驱动的 `run_until` **不会推进队列里的任务**（多线程运行时正常；最小复现见
+//! `mptp_rpc/.tmp/tokio_nested` 的场景 A/C 与 D/E 对照）。因此：
+//!
+//! - 调用线程的本地队列**是空的**（数据由别的线程 / 别的队列供给，本方法只负责等待）
+//!   → `current_thread` 也可以用；`mptp_cs_demo` 的应用线程正是这种形态；
+//! - 调用线程的本地队列**有任务**要推进 → 必须用多线程运行时。
+//!
+//! 换成别的实现也绕不开：tokio 不公开 `LocalSet` 的 `tick`，而 `block_in_place` /
+//! `Handle::block_on` 在本地驱动栈内都不可用（见 `.tmp/bl_probe` 的 E1 与 E3）。
 //!
 //! 取得路径只有一条：`Runtime<CAPS>::local_scope()`（要求 `CAPS` 含
 //! [`SPAWN_LOCAL`](abs_art::SPAWN_LOCAL)）——作用域不会脱离运行时凭空出现。
 
 use alloc::rc::Rc;
-use core::{fmt, future::Future};
+use core::{fmt, future::Future, time::Duration};
 
 use abs_art::TrLocalScope;
 
 use crate::JoinHandle;
+
+/// 两次 park 之间的最长间隔。
+///
+/// 唤醒走 `Thread::unpark`，正常情况下会立刻把线程叫醒；这个超时只是兜底，避免任何一层
+/// 的唤醒丢失让调用方永久挂住。
+const K_PARK_TICK_: Duration = Duration::from_millis(1u64);
+
+/// 纯 park 的同步执行器：只 poll 给定 future，未就绪就把线程挂起。
+///
+/// 它**不**建立 tokio 运行时上下文、也**不**接管任何队列——「驱动本线程队列」那件事由
+/// 传进来的 future 自己完成（即 `LocalSet::run_until` 的返回值）。这里只负责「等待」。
+fn park_on_<F>(future: F) -> <F as Future>::Output
+where
+    F: Future,
+{
+    /// 唤醒 = `unpark` 当前线程。
+    struct ThreadWaker_(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker_ {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = core::pin::pin!(future);
+    let waker = core::task::Waker::from(std::sync::Arc::new(ThreadWaker_(std::thread::current())));
+    let mut context = core::task::Context::from_waker(&waker);
+    loop {
+        match Future::poll(future.as_mut(), &mut context) {
+            core::task::Poll::Ready(output) => return output,
+            // `unpark` 有留存语义，晚到的唤醒不会被丢掉；超时兜底的原因见
+            // [`K_PARK_TICK_`]。
+            core::task::Poll::Pending => std::thread::park_timeout(K_PARK_TICK_),
+        }
+    }
+}
 
 std::thread_local! {
     /// 本线程的本地队列：**全线程唯一**，[`LocalScope`] 只是它的别名。
@@ -146,6 +205,24 @@ impl TrLocalScope for LocalScope {
         F: Future,
     {
         self.local_.run_until(future)
+    }
+
+    /// 阻塞本线程直到 `future` 完成；等待期间由 `LocalSet::run_until` 持续驱动本地队列。
+    ///
+    /// 「驱动队列」与「等待唤醒」分工的完整说明见本模块文档的「阻塞入口」一节。
+    ///
+    /// # 边界
+    ///
+    /// - **IO**：park 期间本线程不再推进 tokio 的 IO driver，因此本线程若还负责某个
+    ///   socket 的读写就会停摆；要让 IO 继续跑，就把连接交给另一条线程驱动（见
+    ///   `mptp_cs_demo` 的宿主线程形态）。
+    /// - **`current_thread` 运行时**：本方法无法推进该队列里的任务（实测），只适用于
+    ///   「本线程队列为空、数据由别处供给」或「运行时是多线程」两种情形。
+    fn block_on_local<F>(&self, future: F) -> <F as Future>::Output
+    where
+        F: Future,
+    {
+        park_on_(self.local_.run_until(future))
     }
 }
 
@@ -366,6 +443,85 @@ mod tests {
             rt.block_on(async {
                 let scope = crate::current().local_scope();
                 take_handle_(scope.spawn_local(async { 1u32 }));
+            });
+        });
+    }
+
+    /// 目的：验证 `block_on_local` 能同步等到**投递在本线程本地队列上的任务**，且不饿死
+    /// 队列里的其他任务。
+    ///
+    /// - 手段：在多线程 tokio 运行时里投递一个「让出 5 次后置位标志」的本地任务，然后用
+    ///   `block_on_local` 同步等这个标志置位。
+    /// - 判定：标志被置位。若实现退回 `block_in_place`，本用例会 panic（tokio 禁止在
+    ///   `LocalSet` 内阻塞）；若 `block_on_local` 只 park 而没驱动队列，则会永久挂起。
+    ///
+    /// # 为什么这里必须是多线程运行时
+    ///
+    /// 本后端的做法是「`LocalSet::run_until` 驱动队列 + 纯 park」。实测（`mptp_rpc` 的
+    /// `.tmp/tokio_nested`）表明：**在 `current_thread` 运行时下，由外部 park 驱动的
+    /// `run_until` 不会推进队列里的任务**；多线程运行时下则正常。原因的准确边界见
+    /// [`LocalScope`] 的「阻塞入口」一节。
+    #[test]
+    fn block_on_local_drives_local_tasks() {
+        in_fresh_thread_(|| {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("建多线程 tokio 运行时");
+            rt.block_on(async {
+                let scope = crate::current().local_scope();
+                let flag = Rc::new(Cell::new(false));
+                let setter = Rc::clone(&flag);
+                scope
+                    .spawn_local(async move {
+                        for _ in 0..5 {
+                            tokio::task::yield_now().await;
+                        }
+                        setter.set(true);
+                    })
+                    .detach();
+                let waiting = Rc::clone(&flag);
+                scope.block_on_local(async move {
+                    while !waiting.get() {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                assert!(flag.get(), "供料任务没有被推进");
+            });
+        });
+    }
+
+    /// 目的：验证 `block_on_local` 的等待路径本身成立——队列为空、数据由**别的线程**
+    /// 供给时，它靠 park 与外部唤醒完成等待（这正是 `mptp_cs_demo` 应用线程的形态）。
+    ///
+    /// - 手段：起一条后台线程，100ms 后把一个原子标志置位；本线程取作用域后用
+    ///   `block_on_local` 同步等这个标志。
+    /// - 判定：取回的标志为真，且等待期间本地队列里没有任何任务（作用域是刚取的，
+    ///   空队列）——证明成功来自「park + 被外部唤醒」，而不是靠队列里的任务。
+    #[test]
+    fn block_on_local_waits_for_another_threads_data() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        in_fresh_thread_(|| {
+            let rt = rt_();
+            let done = Arc::new(AtomicBool::new(false));
+            let setter = Arc::clone(&done);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                setter.store(true, Ordering::SeqCst);
+            });
+
+            rt.block_on(async {
+                let scope = crate::current().local_scope();
+                scope.block_on_local(async move {
+                    while !done.load(Ordering::SeqCst) {
+                        tokio::task::yield_now().await;
+                    }
+                });
             });
         });
     }

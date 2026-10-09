@@ -37,17 +37,31 @@
 //! 同一线程上多次 `local_scope()` 拿到的是**同一条**队列；类型是 `!Send`，跨线程只能
 //! 在目标线程上另取。「同一线程多条本地队列」这套 tokio 用法被**显式排除**。
 //!
-//! ## 作用域**不**提供阻塞入口
+//! ## 作用域的阻塞入口是 `block_on_local`，不是运行时原语
 //!
-//! `TrLocalScope` 只有 [`spawn_local`](TrLocalScope::spawn_local) 与
-//! [`run_until`](TrLocalScope::run_until)：前者投递，后者异步驱动本线程队列。
-//! 阻塞等待只由运行时值的 [`TrBlockOn::block_on`] 提供，而它**只等待、不驱动本地队列**。
+//! `TrLocalScope` 有三条方法：[`spawn_local`](TrLocalScope::spawn_local)（投递）、
+//! [`run_until`](TrLocalScope::run_until)（异步驱动本线程队列），以及
+//! [`block_on_local`](TrLocalScope::block_on_local)（**同步**等到 future 完成，等待期间
+//! 持续驱动本线程队列）。
 //!
-//! 这条删除不是剪裁，而是把三个后端本来就不一致的承诺收回去：tokio 的
-//! `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止（源码注释原文：
-//! 「in a LocalSet, where it is _not_ okay to block」），把它留在 trait 上等于让
-//! 「`scope.block_on`」在 tokio 上 panic、在 compio 上顺带驱动整个运行时、
-//! 在 smol 上只驱动自己那条队列。
+//! 早先本 trait 上确实有一条 `block_on`，但它把「怎么阻塞」整个交给各后端，于是同一个
+//! 名字在三处的承诺互不相同：tokio 走 `block_in_place`（在 `LocalSet` 内被 tokio 自己
+//! 禁止，源码注释原文「in a LocalSet, where it is _not_ okay to block」）、compio 顺带
+//! 驱动整个运行时、smol 只驱动自己那条队列。那条方法因此被删除。
+//!
+//! 现在的 [`block_on_local`](TrLocalScope::block_on_local) 不是把老路捡回来：它
+//! **不使用任何运行时的阻塞原语**，而是「自己把本线程队列驱动起来 + 把线程挂起/自己
+//! tick」：
+//!
+//! | 后端 | 等待期间做什么 | 本线程的 IO |
+//! | --- | --- | --- |
+//! | tokio | `LocalSet::run_until` 驱动队列 + 纯 park | 不推进（IO driver 依附 `block_on`） |
+//! | smol | `LocalExecutor::run` 驱动队列 + 纯 park | 不推进（`async-io` 反应器同此） |
+//! | compio | 自己 tick（`Runtime::run` + `poll_with`，与自己 `block_on` 同一套循环） | 照常推进 |
+//!
+//! 三者的**接口与可观察语义一致**（同步等待 + 不饿死本地队列 + 可在本地队列的驱动栈内
+//! 调用）；差异只剩「本线程的 IO 由谁推」——那是各运行时自身的性质，如实写在表里，
+//! 调用方按它决定线程布局。
 //!
 //! ## 作用域怎么来
 //!
@@ -219,10 +233,10 @@ pub trait TrSpawnBlocking {
 /// # 它**不**驱动本地队列
 ///
 /// 本地队列不归运行时值所有（见 [`TrLocalScope`]），所以本方法**只等待**，
-/// 不驱动任何 `!Send` 任务的队列。需要「等待期间继续驱动本线程的本地队列」时，
-/// 把 [`TrLocalScope::run_until`] 交给一个正在跑的驱动源去 await——形如
-/// `rt.block_on(scope.run_until(f))`；这个组合只在**不在本地队列驱动栈内**时成立，
-/// tokio 在 `LocalSet` 内会直接 panic。抽象层因此不再提供「作用域的阻塞入口」。
+/// 不驱动任何 `!Send` 任务的队列。需要「等待期间继续驱动本线程的本地队列」时用作用域的
+/// [`TrLocalScope::block_on_local`]——它自己驱动队列、不借运行时的阻塞原语；而本方法与
+/// [`TrLocalScope::run_until`] 的组合 `rt.block_on(scope.run_until(f))` 只在**不在本地
+/// 队列驱动栈内**时成立，tokio 在 `LocalSet` 内会直接 panic。
 ///
 /// # Examples
 ///
@@ -271,13 +285,13 @@ pub trait TrBlockOn {
 /// 集成方经各后端的 `Runtime<CAPS>::local_scope()` 取得作用域，而该关联函数要求
 /// `CAPS` 含本位——于是「开始用本地投递」这个动作必然在代码里留下痕迹。
 ///
-/// # 它**不**提供阻塞入口
+/// # 它的阻塞入口是 [`block_on_local`](Self::block_on_local)
 ///
-/// 阻塞等待由运行时值的 [`TrBlockOn::block_on`] 提供，且**不驱动本地队列**；
-/// 作用域只提供 [`run_until`](Self::run_until) 这一条异步驱动入口。理由：tokio 的
-/// `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止（源码注释：「in a LocalSet,
-/// where it is _not_ okay to block」）——把阻塞入口留在本 trait 上，三个后端就只能
-/// 对同一个名字给出三种互不相同的承诺。
+/// 作用域**有**一条阻塞入口，但它不是运行时的阻塞原语：它自己驱动本线程队列，再把线程
+/// 挂起（tokio / smol 的纯 park），或在 compio 上自己 tick 执行器与 IO。因此它可以在
+/// **本地队列的驱动栈内**调用——这正是 tokio 的 `block_in_place` 做不到的事。
+///
+/// 需要「只等待、不驱动本地队列」时，用运行时值的 [`TrBlockOn::block_on`]。
 ///
 /// # 它**不**提供计时与时刻
 ///
@@ -291,7 +305,10 @@ pub trait TrBlockOn {
 /// 1. [`spawn_local`](Self::spawn_local) 投递的任务，其推进**不得依赖句柄被 poll**——
 ///    只要本线程仍在驱动这条队列，任务就应当持续运行；
 /// 2. [`TrJoinHandle::detach`] 之后任务**继续运行**：队列归本线程所有；
-/// 3. [`run_until`](Self::run_until) 在等待传入 future 期间，必须持续驱动本地队列。
+/// 3. [`run_until`](Self::run_until) 在等待传入 future 期间，必须持续驱动本地队列；
+/// 4. [`block_on_local`](Self::block_on_local) 在阻塞期间同样必须持续驱动本地队列，
+///    且**不得**依赖各运行时的阻塞原语（tokio 的 `block_in_place` 在 `LocalSet` 内被
+///    禁止，一旦用了，调用点位于本地队列驱动栈内时就会 panic 或停摆）。
 ///
 /// # Examples
 ///
@@ -339,10 +356,54 @@ pub trait TrLocalScope {
     /// # 嵌套与阻塞
     ///
     /// `run_until` 可以嵌套 `run_until`（外层驱动本线程队列的同时，内层继续驱动同一条
-    /// 队列）。但**不得**在其内部做阻塞驱动：tokio 的 `block_in_place` 在 `LocalSet`
-    /// 内会 panic——这正是阻塞入口从本 trait 删除的直接原因。需要阻塞等待时，用运行时
-    /// 值的 [`TrBlockOn::block_on`]，但要清楚它**不驱动本地队列**。
+    /// 队列）。但**不得**在其内部调用运行时的阻塞原语：tokio 的 `block_in_place` 在
+    /// `LocalSet` 内会 panic。需要**同步**等待时用
+    /// [`block_on_local`](Self::block_on_local)——它自己驱动队列、不借运行时原语，
+    /// 因此在本地驱动栈内也成立。
     fn run_until<F>(&self, future: F) -> impl Future<Output = <F as Future>::Output>
+    where
+        F: Future;
+
+    /// 阻塞当前线程直到 `future` 完成；等待期间**持续驱动本线程的本地队列**。
+    ///
+    /// 这是「同步等一个由本地任务供料的 future」的入口：调用方写的是同步代码
+    /// （例如 `std::io::Read`），而数据要靠投递在本线程队列上的循环搬进来时，用本方法
+    /// 原地等待——队列里的其它任务不会被饿死。
+    ///
+    /// # 它和 [`TrBlockOn::block_on`] 不是一回事
+    ///
+    /// | | 驱动本地队列 | 能在本地驱动栈内调用 | 本线程的 IO |
+    /// | --- | --- | --- | --- |
+    /// | [`TrBlockOn::block_on`] | **不** | tokio 上**不能**（`block_in_place` 被禁止） | tokio 让渡 worker，全局任务照跑 |
+    /// | `block_on_local` | **会** | **能**（不用任何运行时阻塞原语） | tokio / smol 停；compio 照推 |
+    ///
+    /// # 各后端的做法
+    ///
+    /// | 后端 | 实现 |
+    /// | --- | --- |
+    /// | tokio | `LocalSet::run_until` 驱动队列，外层是**纯 park** 执行器（`park_timeout`） |
+    /// | smol | `LocalExecutor::run` 驱动队列，外层同上 |
+    /// | compio | 自己 tick：`Runtime::run` + `poll_with`（与 compio 自己的 `block_on` 同一套循环） |
+    ///
+    /// compio 那一行不是特例待遇，而是它的队列本就归运行时所有、由运行时自己 tick；
+    /// 反过来，tokio / smol 的队列必须由持有者驱动，所以「驱动队列」这一步只能由本方法
+    /// 自己做——这正是它不能退化成运行时阻塞原语的原因。
+    ///
+    /// 一处**如实的差异**：tokio 在 `current_thread` 运行时下，本地队列只能被它自己的
+    /// 驱动源推进，所以「调用线程队列里确实有任务要跑」这一情形需要多线程运行时；队列为
+    /// 空、只等别处供给时 `current_thread` 也成立（`mptp_cs_demo` 的应用线程即后者）。
+    /// 细节与最小复现见 `abs_art-tokio` 的 `LocalScope` 文档。
+    ///
+    /// # 前提与边界
+    ///
+    /// - 调用线程必须**就是**本作用域所属的线程（作用域是 `!Send`，编译期即保证）；
+    /// - tokio / smol 下 park 期间**本线程不会推进该运行时的 IO driver / 反应器**：
+    ///   若本线程同时还负责某个 socket 的 IO，它会停摆。把「驱动连接的线程」与
+    ///   「调用本方法的线程」分开（例如 `mptp_cs_demo` 的 `rt_*` 的宿主线程形态）正是
+    ///   为这条边界准备的；compio 无此限制；
+    /// - 可以嵌套：内层调用会继续驱动同一条队列（tokio / smol 的 `run_until` 允许嵌套，
+    ///   compio 本来就只有一个执行器）。
+    fn block_on_local<F>(&self, future: F) -> <F as Future>::Output
     where
         F: Future;
 }

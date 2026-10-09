@@ -35,7 +35,7 @@
 //! 构造入口**不公开**。
 
 use alloc::rc::Rc;
-use core::{fmt, future::Future};
+use core::{fmt, future::Future, time::Duration};
 
 use abs_art::TrLocalScope;
 
@@ -47,6 +47,47 @@ std::thread_local! {
     /// 惰性初始化（首次访问时建一条），线程退出时随 TLS 销毁。销毁时执行器里
     /// 未完成的任务被取消，这正是「队列寿命 = 线程寿命」的具体含义。
     static LOCAL_QUEUE_: Rc<smol::LocalExecutor<'static>> = Rc::new(smol::LocalExecutor::new());
+}
+
+/// 两次 park 之间的最长间隔。
+///
+/// 唤醒走 `Thread::unpark`，正常情况下会立刻把线程叫醒；这个超时只是兜底，避免任何一层
+/// 的唤醒丢失让调用方永久挂住。
+const K_PARK_TICK_: Duration = Duration::from_millis(1u64);
+
+/// 纯 park 的同步执行器：只 poll 给定 future，未就绪就把线程挂起。
+///
+/// 它**不**进入任何运行时上下文、也**不**接管队列——「驱动本线程队列」那件事由传进来的
+/// future 自己完成（即 `LocalExecutor::run` 的返回值，见
+/// [`TrLocalScope::block_on_local`]）。这里只负责「等待」。
+fn park_on_<F>(future: F) -> <F as Future>::Output
+where
+    F: Future,
+{
+    /// 唤醒 = `unpark` 当前线程。
+    struct ThreadWaker_(std::thread::Thread);
+
+    impl std::task::Wake for ThreadWaker_ {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let mut future = core::pin::pin!(future);
+    let waker = core::task::Waker::from(std::sync::Arc::new(ThreadWaker_(std::thread::current())));
+    let mut context = core::task::Context::from_waker(&waker);
+    loop {
+        match Future::poll(future.as_mut(), &mut context) {
+            core::task::Poll::Ready(output) => return output,
+            // `unpark` 有留存语义，晚到的唤醒不会被丢掉；超时兜底的原因见
+            // [`K_PARK_TICK_`]。
+            core::task::Poll::Pending => std::thread::park_timeout(K_PARK_TICK_),
+        }
+    }
 }
 
 /// smol 后端的本地作用域：**本线程那条 `LocalExecutor` 的别名**。
@@ -68,6 +109,17 @@ std::thread_local! {
 /// **同一条**队列——两者都**不会**新建队列。「同一线程多条 `LocalExecutor`」
 /// 不再是本 crate 的使用方式（旧版本每条作用域各建一条，单测
 /// `separate_scopes_have_separate_queues` 记录过那个语义，现已反转）。
+///
+/// # 阻塞入口：`block_on_local` 用「驱动队列 + 纯 park」
+///
+/// smol 的 `block_on`（`async_io::block_on`）只知道怎么等 IO，**对 `LocalExecutor`
+/// 一无所知**；而那条队列必须由持有者驱动。于是同步等待在本后端被拆成两半：
+/// **驱动队列**交给 `LocalExecutor::run`，**等待唤醒**交给纯 park 执行器（[`park_on_`]：
+/// 只 poll + `park_timeout`，不进入任何运行时上下文）。两者拼起来即
+/// [`TrLocalScope::block_on_local`]。
+///
+/// **边界**：park 期间本线程不再推进 `async-io` 的反应器，因此本线程若还负责某个
+/// socket 的 IO 就会停摆——调用方要把这两件事分到不同线程。
 ///
 /// # Examples
 ///
@@ -148,6 +200,21 @@ impl TrLocalScope for LocalScope {
         F: Future,
     {
         self.local_.run(future)
+    }
+
+    /// 阻塞本线程直到 `future` 完成；等待期间由 `LocalExecutor::run` 持续驱动本地队列。
+    ///
+    /// 「驱动队列」与「等待唤醒」分工的完整说明见 [`LocalScope`] 的「阻塞入口」一节。
+    ///
+    /// # 边界
+    ///
+    /// park 期间**本线程不再推进 `async-io` 的反应器**：若这条线程同时还负责某个 socket
+    /// 的读写，它会停摆。要让 IO 继续跑，就把连接交给另一条线程驱动。
+    fn block_on_local<F>(&self, future: F) -> <F as Future>::Output
+    where
+        F: Future,
+    {
+        park_on_(self.local_.run(future))
     }
 }
 
@@ -372,6 +439,39 @@ mod tests {
 
             let scope = crate::current().local_scope();
             take_handle_(scope.spawn_local(async { 1u32 }));
+        });
+    }
+
+    /// 目的：验证 `block_on_local` 能在**本地队列的驱动栈之内**同步等到队列上的任务，
+    /// 且不饿死队列里的其他任务。
+    ///
+    /// - 手段：在 `scope.run_until(..)` 内部投递一个「让出 5 次后置位标志」的本地任务，
+    ///   再在同一调用栈内用 `block_on_local` 同步等这个标志置位。
+    /// - 判定：标志被置位。若 `block_on_local` 只 park 却不驱动 `LocalExecutor`，本用例
+    ///   会永久挂起。
+    #[test]
+    fn block_on_local_waits_inside_the_driving_stack() {
+        in_fresh_thread_(|| {
+            let scope = crate::current().local_scope();
+            smol::block_on(scope.run_until(async {
+                let flag = Rc::new(Cell::new(false));
+                let setter = Rc::clone(&flag);
+                scope
+                    .spawn_local(async move {
+                        for _ in 0..5 {
+                            smol::future::yield_now().await;
+                        }
+                        setter.set(true);
+                    })
+                    .detach();
+                let waiting = Rc::clone(&flag);
+                scope.block_on_local(async move {
+                    while !waiting.get() {
+                        smol::future::yield_now().await;
+                    }
+                });
+                assert!(flag.get(), "供料任务没有被推进");
+            }));
         });
     }
 }

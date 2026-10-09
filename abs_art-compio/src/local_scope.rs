@@ -39,13 +39,25 @@
 //! （对照 tokio 的 `LocalSet::run_until`）。因此本后端的 `run_until(future)`
 //! **原样返回 `future`**：驱动来自外层已经在跑的那个 compio `block_on` / `wait`。
 //!
-//! 抽象层的作用域上**没有**阻塞入口（tokio 的 `block_in_place` 在 `LocalSet` 内被
-//! tokio 自己禁止，那条能力因此被收回）。需要阻塞等待时用运行时值的
-//! [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on)——在 compio 上它顺带就把
-//! 本运行时的执行器 tick 了：`self.rt_.block_on` 自己 `enter` 并循环执行
-//! 「轮询 future → tick executor → 轮询驱动」。
+//! # 阻塞入口：[`TrLocalScope::block_on_local`] 自己 tick 执行器与 IO
+//!
+//! 正因为队列不可分离，compio 上的 [`block_on_local`](TrLocalScope::block_on_local)
+//! 不需要「park 出去等别人驱动」：它握着这份运行时，直接跑 compio 自己
+//! `Runtime::block_on` 内部那套循环——`轮询 future → tick executor → 有活只探一次 IO /
+//! 没活则阻塞等 IO`。因此它**不进入运行时上下文也能用**，且阻塞期间执行器与 IO proactor
+//! 都在同一线程上照常推进（这一点与 tokio / smol 相反，那两端的 park 会让本线程的 IO
+//! 停摆）。
+//!
+//! 运行时值的 [`TrBlockOn::block_on`](abs_art::TrBlockOn::block_on) 在 compio 上做的是
+//! 同一件事（`self.rt_.block_on` 也 `enter` 并 tick 执行器）；两者的差别只在「谁提供
+//! 上下文」：`block_on` 由运行时值提供，`block_on_local` 用作用域已经钉住的那一份。
 
-use core::{fmt, future::Future};
+use core::{
+    fmt,
+    future::Future,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use abs_art::TrLocalScope;
 
@@ -158,6 +170,43 @@ impl TrLocalScope for LocalScope {
         F: Future,
     {
         future
+    }
+
+    /// 阻塞本线程直到 `future` 完成；等待期间自己 tick 本作用域的执行器与 IO proactor。
+    ///
+    /// 内部就是 compio `Runtime::block_on` 的那套循环（`轮询 future → tick executor →
+    /// 有活只探一次 IO / 没活则阻塞等 IO`），因此：
+    ///
+    /// - 调用点**不必**额外进入 compio 上下文——队列就在本作用域钉住的运行时里；
+    /// - 阻塞期间同一线程上既推进队列又推进 IO，不像 tokio / smol 那样让本线程的 IO 停摆。
+    ///
+    /// # Panics
+    ///
+    /// 本方法自身不 panic。若 `future` 内部依赖 compio 的**环境式**入口（例如
+    /// `TrDelay::delay` 在线程本地注册计时器），注册点看到的仍是当前线程的上下文，
+    /// 与调用点是否 `enter` 过一致。
+    fn block_on_local<F>(&self, future: F) -> <F as Future>::Output
+    where
+        F: Future,
+    {
+        let runtime = &self.rt_;
+        let waker = runtime.waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = core::pin::pin!(future);
+        loop {
+            if let Poll::Ready(output) = Future::poll(future.as_mut(), &mut context) {
+                // 与 compio 自己的 `block_on` 一致：返回前把队列里剩下的活跑掉。
+                runtime.run();
+                return output;
+            }
+            if runtime.run() {
+                // 还有排队中的任务：只探一次 IO，不阻塞。
+                runtime.poll_with(Some(Duration::ZERO));
+            } else {
+                // 没有可跑的任务：阻塞等 IO 或下一个定时器（唤醒经本运行时的 waker 到达）。
+                runtime.poll();
+            }
+        }
     }
 }
 
@@ -341,6 +390,57 @@ mod tests {
         rt.block_on(async {
             let scope = crate::current().local_scope();
             take_handle_(scope.spawn_local(async { 1u32 }));
+        });
+    }
+
+    /// 让出一次执行权：自唤醒一次后返回 `Pending`（不依赖 compio 的计时 feature）。
+    async fn yield_once_() {
+        let mut first = true;
+        core::future::poll_fn(move |cx| {
+            if first {
+                first = false;
+                cx.waker().wake_by_ref();
+                core::task::Poll::Pending
+            } else {
+                core::task::Poll::Ready(())
+            }
+        })
+        .await;
+    }
+
+    /// 目的：验证 `block_on_local` 在 compio 上自己 tick 执行器，能在**本地队列的驱动栈
+    /// 之内**同步等到队列上的任务。
+    ///
+    /// - 手段：在 `scope.run_until(..)` 内投递一个「让出 5 次后置位标志」的本地任务，再在
+    ///   同一调用栈内用 `block_on_local` 同步等标志置位。
+    /// - 判定：标志被置位。compio 的 `run_until` 是恒等函数，若 `block_on_local` 只 park
+    ///   而不自己 `run` / `poll`，本用例会永久挂起。
+    #[test]
+    fn block_on_local_waits_inside_the_driving_stack() {
+        let rt = CompioRuntime::new().unwrap();
+        rt.block_on(async {
+            let scope = crate::current().local_scope();
+            scope
+                .run_until(async {
+                    let flag = Rc::new(Cell::new(false));
+                    let setter = Rc::clone(&flag);
+                    scope
+                        .spawn_local(async move {
+                            for _ in 0..5 {
+                                yield_once_().await;
+                            }
+                            setter.set(true);
+                        })
+                        .detach();
+                    let waiting = Rc::clone(&flag);
+                    scope.block_on_local(async move {
+                        while !waiting.get() {
+                            yield_once_().await;
+                        }
+                    });
+                    assert!(flag.get(), "供料任务没有被推进");
+                })
+                .await;
         });
     }
 

@@ -62,15 +62,19 @@
 //! | --- | --- | --- |
 //! | 本地投递（`!Send`） | 作用域 `S: TrLocalScope` | `scope.spawn_local(f)` |
 //! | 异步驱动本线程队列 | 作用域 | `scope.run_until(f)` |
+//! | **阻塞 + 驱动队列** | 作用域 | `scope.block_on_local(f)`（后端各按运行时性质实现） |
 //! | 阻塞等待（**不**驱动队列） | 运行时值 | `rt.block_on(f)`（`TrBlockOn::block_on`） |
-//! | 阻塞 + 驱动队列（组合） | 两者 | `rt.block_on(scope.run_until(f))` |
+//! | 阻塞 + 驱动队列（组合写法） | 两者 | `rt.block_on(scope.run_until(f))` |
 //! | 睡眠 / 周期 / 超时 | 运行时值 | `rt.delay(d)` / `rt.interval(p)` / `rt.timeout(d, f)` |
 //! | 取时刻 | 运行时值 | `rt.now()`（`TrClock`，与计时器同源） |
 //!
-//! 「阻塞」与「驱动队列」是本轮要钉的重点，而且它们是**两件事、两个 trait**：作用域上
-//! 不再有阻塞入口（tokio 的 `block_in_place` 在 `LocalSet` 内被 tokio 自己禁止，三后端
-//! 对 `scope.block_on` 给不出同一个承诺）。D 用例走组合写法；[`time_probe`] 的那组探针
-//! 一个本地任务也不投，因此只走运行时值的 `block_on`。
+//! 「阻塞」与「驱动队列」是两件事，抽象层给了两条路：作用域的 `block_on_local` **自己**
+//! 驱动队列（不借运行时的阻塞原语，因此可以在本地队列的驱动栈内调用）；运行时值的
+//! `block_on` 只等待，不驱动队列（tokio 上它是 `block_in_place`，在 `LocalSet` 内被
+//! tokio 自己禁止）。本 crate 的 D 用例测的是后者的**组合写法**
+//! `rt.block_on(scope.run_until(f))`；`block_on_local` 的契约由三个后端各自的
+//! `local_scope` 单测覆盖。[`time_probe`] 的那组探针一个本地任务也不投，因此只走运行时
+//! 值的 `block_on`。
 //!
 //! 本地投递类探针因此泛型于**作用域** `S: TrLocalScope`，计时类探针泛型于**运行时值**
 //! `R: TrTime`——这正是本轮的分工。
