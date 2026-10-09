@@ -201,6 +201,22 @@ pub fn current() -> Runtime {
     Runtime::current()
 }
 
+/// 当前上下文里的运行时值——**永远**是 `Option::Some`。
+///
+/// smol 的值是零大小标记、全局执行器是进程级单例（见 [`Runtime::current`]），因此
+/// 「调用点是否处于上下文内」这个问题在 smol 上**没有否定答案**。本函数的存在只是
+/// 为了让「从上下文取运行时值」这条调用在三后端下形状一致（例如
+/// `smux_v1` 的 `CurrentConnCfg` 只需要一个入口）。
+///
+/// # Examples
+///
+/// ```
+/// assert!(abs_art_smol::try_current().is_some());
+/// ```
+pub fn try_current() -> Option<Runtime> {
+    Runtime::<{ FULL }>::try_current()
+}
+
 impl<const CAPS: usize> Runtime<CAPS> {
     /// 构造运行时值。
     ///
@@ -227,6 +243,23 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// ```
     pub fn current() -> Self {
         Self
+    }
+
+    /// 当前上下文里的运行时值——**永远**是 `Option::Some`。
+    ///
+    /// 与 [`Runtime::current`] 等价（本类型是 ZST、没有先决条件）：这里返回 `Option`
+    /// 只为与另外两个后端的同名入口保持形状一致。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art_smol::Runtime;
+    ///
+    /// let value = Runtime::<{ abs_art::FULL }>::try_current();
+    /// assert!(value.is_some());
+    /// ```
+    pub fn try_current() -> Option<Self> {
+        Option::Some(Self)
     }
 
     /// 复制这个标记，并在 CAPS 上「换标签」。

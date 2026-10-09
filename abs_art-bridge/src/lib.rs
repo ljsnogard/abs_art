@@ -271,10 +271,12 @@ pub use abs_art_smol::Runtime;
 ))]
 pub use abs_art_smol::LocalScope;
 
-/// 当前**默认**后端的「用运行时上下文构造全能力值」入口。
+/// 当前**默认**后端的「从运行时上下文取全能力值」入口：`current()` 与它的可查询
+/// 版本 `try_current()`。
 ///
-/// 等价于 `Runtime::<{ FULL }>::current()`，但**不需要写类型参数**，因此在表达式
-/// 位置也不会遇到类型推断问题。
+/// `current()` 等价于 `Runtime::<{ FULL }>::current()`，但**不需要写类型参数**，
+/// 因此在表达式位置也不会遇到类型推断问题；`try_current()` 在**不在**上下文内时
+/// 给出 `Option::None` 而不是 panic（语义见各后端的同名函数）。
 #[cfg(any(
     all(
         feature = "default-backend-tokio",
@@ -292,9 +294,11 @@ pub use abs_art_smol::LocalScope;
         not(feature = "backend-smol"),
     ),
 ))]
-pub use abs_art_tokio::current;
+pub use abs_art_tokio::{current, try_current};
 
-/// 当前**默认**后端的构造入口（compio 版）。
+/// 当前**默认**后端的取用入口（compio 版）：`current()` 与不 panic 的
+/// `try_current()`。compio 的运行时**绑定创建它的线程**，因此 `try_current()` 在
+/// 别的线程上通常给出 `Option::None`——这不是缺陷，而是「线程本地运行时」的如实表达。
 #[cfg(any(
     all(
         feature = "default-backend-compio",
@@ -312,9 +316,10 @@ pub use abs_art_tokio::current;
         not(feature = "backend-smol"),
     ),
 ))]
-pub use abs_art_compio::current;
+pub use abs_art_compio::{current, try_current};
 
-/// 当前**默认**后端的构造入口（smol 版）。
+/// 当前**默认**后端的取用入口（smol 版）：`current()` 与 `try_current()`——
+/// 后者在 smol 上**永远**是 `Option::Some`（值是零大小标记，没有先决条件）。
 #[cfg(any(
     all(
         feature = "default-backend-smol",
@@ -332,7 +337,7 @@ pub use abs_art_compio::current;
         feature = "backend-smol",
     ),
 ))]
-pub use abs_art_smol::current;
+pub use abs_art_smol::{current, try_current};
 
 /// 具名别名：tokio 后端的完整能力集。
 #[cfg(feature = "backend-tokio")]

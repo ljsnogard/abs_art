@@ -176,6 +176,25 @@ pub fn current() -> Runtime {
     Runtime::current()
 }
 
+/// 当前 tokio 运行时上下文里的运行时值；**不在**上下文内时返回 `Option::None`。
+///
+/// 与 [`current`] 的唯一区别是**不 panic**：它把「调用点是否处于 tokio 运行时
+/// 上下文内」变成可查询的返回值，供调用方（例如 `smux_v1` 的 `CurrentConnCfg`）在
+/// debug 构建下给出自己的提示，而不是等到 `Handle::current()` 抛 panic 才发现。
+///
+/// # Examples
+///
+/// ```
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// assert!(rt.block_on(async { abs_art_tokio::try_current().is_some() }));
+/// // 上下文之外（普通线程）得到 `None`，不 panic：
+/// let outside = std::thread::spawn(abs_art_tokio::try_current).join().unwrap();
+/// assert!(outside.is_none());
+/// ```
+pub fn try_current() -> Option<Runtime> {
+    Runtime::<{ FULL }>::try_current()
+}
+
 impl<const CAPS: usize> Runtime<CAPS> {
     /// 用当前 tokio 运行时上下文构造运行时值。
     ///
@@ -195,6 +214,29 @@ impl<const CAPS: usize> Runtime<CAPS> {
     /// ```
     pub fn current() -> Self {
         Self::with_handle(tokio::runtime::Handle::current())
+    }
+
+    /// 当前上下文里的运行时值；**不在**上下文内时返回 `Option::None`（不 panic）。
+    ///
+    /// 这是 [`Runtime::current`] 的可查询版本（`tokio::runtime::Handle::try_current`
+    /// 的薄封装）：「调用点是否处于 tokio 运行时上下文内」在这里是一个返回值，
+    /// 而不是一次 panic。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art_tokio::Runtime;
+    ///
+    /// let rt = tokio::runtime::Runtime::new().unwrap();
+    /// let inside = rt.block_on(async { Runtime::<{ abs_art::FULL }>::try_current() });
+    /// assert!(inside.is_some());
+    /// let outside = std::thread::spawn(Runtime::<{ abs_art::FULL }>::try_current)
+    ///     .join()
+    ///     .unwrap();
+    /// assert!(outside.is_none());
+    /// ```
+    pub fn try_current() -> Option<Self> {
+        tokio::runtime::Handle::try_current().ok().map(Self::with_handle)
     }
 
     /// 用给定的 tokio 句柄构造运行时值。

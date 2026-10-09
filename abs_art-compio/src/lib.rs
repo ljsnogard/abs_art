@@ -304,6 +304,28 @@ pub fn current() -> Runtime {
     Runtime::current()
 }
 
+/// 当前 compio 运行时上下文里的运行时值；**不在**上下文内时返回 `Option::None`。
+///
+/// 与 [`current`] 的唯一区别是**不 panic**：它把「调用点是否处于 compio 运行时
+/// 上下文内」变成可查询的返回值，供调用方（例如 `smux_v1` 的 `CurrentConnCfg`）在
+/// debug 构建下给出自己的提示——compio 的运行时是**线程绑定**的，跨线程使用时
+/// 「每条线程都处于自己的 compio 上下文内」这件事由调用者保证。
+///
+/// # Examples
+///
+/// ```
+/// let rt = compio::runtime::Runtime::new().unwrap();
+/// assert!(rt.block_on(async { abs_art_compio::try_current().is_some() }));
+/// // 上下文之外（另一条线程）得到 `None`，不 panic：
+/// let outside = std::thread::spawn(|| abs_art_compio::try_current().is_none())
+///     .join()
+///     .unwrap();
+/// assert!(outside);
+/// ```
+pub fn try_current() -> Option<Runtime> {
+    Runtime::<{ FULL }>::try_current()
+}
+
 impl<const CAPS: usize> Runtime<CAPS>
 where
     [(); CAPS]: CompioCaps_,
@@ -351,6 +373,30 @@ where
     /// ```
     pub fn current() -> Self {
         Self::with_runtime(compio::runtime::Runtime::current())
+    }
+
+    /// 当前上下文里的运行时值；**不在**上下文内时返回 `Option::None`（不 panic）。
+    ///
+    /// 这是 [`Runtime::current`] 的可查询版本（`compio::runtime::Runtime::try_current`
+    /// 的薄封装）。compio 的运行时**绑定创建它的线程**，因此本函数在别的线程上
+    /// 通常给出 `None`——这不是缺陷，而是「线程本地运行时」这条事实的如实表达。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_art_compio::{FULL, Runtime};
+    ///
+    /// let rt = compio::runtime::Runtime::new().unwrap();
+    /// let inside = rt.block_on(async { Runtime::<{ FULL }>::try_current() });
+    /// assert!(inside.is_some());
+    /// // 上下文之外（另一条线程）得到 `None`，不 panic：
+    /// let outside = std::thread::spawn(|| Runtime::<{ FULL }>::try_current().is_none())
+    ///     .join()
+    ///     .unwrap();
+    /// assert!(outside);
+    /// ```
+    pub fn try_current() -> Option<Self> {
+        compio::runtime::Runtime::try_current().map(Self::with_runtime)
     }
 
     /// 用给定的 compio 运行时构造运行时值。
