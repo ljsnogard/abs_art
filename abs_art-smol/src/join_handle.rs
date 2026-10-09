@@ -53,10 +53,19 @@ where
 
 /// `Runtime` 的句柄类型与能力无关：任何 `CAPS` 都使用同一个 `JoinHandle`。
 impl<const CAPS: usize> TrAsyncRuntime for Runtime<CAPS> {
-    type JoinHandle<T>
-        = JoinHandle<T>
-    where
-        T: 'static;
+    type JoinHandle<T> = JoinHandle<T> where T: 'static;
+
+    const FULL_CAP: usize = crate::FULL;
+
+    #[inline]
+    fn current() -> Self where Self: Sized {
+        Runtime::current()
+    }
+
+    #[inline]
+    fn try_current() -> Option<Self> where Self: Sized {
+        Runtime::try_current()
+    }
 
     fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Smol

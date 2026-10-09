@@ -5,7 +5,6 @@ members = [
     "abs_art-compio",
     "abs_art-smol",
     "abs_art-bridge",
-    "abs_art-demo",
     "abs_art-smoke",
     "abs_art-mock_clock",
 ]

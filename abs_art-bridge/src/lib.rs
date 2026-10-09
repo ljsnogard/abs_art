@@ -82,71 +82,6 @@ pub use abs_art::{
     TrMockClock, TrSpawnBlocking, TrSpawnSend, TrTime,
 };
 
-// ── 「完整能力集」按**后端**给，而不是按位集合给 ───────────────────────────
-//
-// `abs_art::FULL` 是「所有位」；但每个后端**实现得了的**位不同：compio 没有跨线程
-// 全局队列，它的 `FULL` 不含 `SPAWN_SEND`。所以这里：
-// - 裸名 `FULL` = **当前默认后端**的完整能力集；
-// - 具名 `TokioFull` / `CompioFull` / `SmolFull` = 各后端自己的完整能力集
-//   （只要该后端的 feature 开启就存在，因此 `cargo test --workspace` 的 feature
-//   并集下仍然精确）。
-#[cfg(any(
-    all(
-        feature = "default-backend-tokio",
-        not(feature = "default-backend-compio"),
-        not(feature = "default-backend-smol"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        feature = "backend-tokio",
-        not(feature = "backend-compio"),
-        not(feature = "backend-smol"),
-    ),
-))]
-pub use abs_art_tokio::FULL;
-
-#[cfg(any(
-    all(
-        feature = "default-backend-compio",
-        not(feature = "default-backend-tokio"),
-        not(feature = "default-backend-smol"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        not(feature = "backend-tokio"),
-        feature = "backend-compio",
-        not(feature = "backend-smol"),
-    ),
-))]
-pub use abs_art_compio::FULL;
-
-#[cfg(any(
-    all(
-        feature = "default-backend-smol",
-        not(feature = "default-backend-tokio"),
-        not(feature = "default-backend-compio"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        not(feature = "backend-tokio"),
-        not(feature = "backend-compio"),
-        feature = "backend-smol",
-    ),
-))]
-pub use abs_art_smol::FULL;
-
 /// 当前**默认**后端提供的运行时类型。
 ///
 /// 选择规则：
@@ -271,85 +206,6 @@ pub use abs_art_smol::Runtime;
 ))]
 pub use abs_art_smol::LocalScope;
 
-/// 当前**默认**后端的「从运行时上下文取全能力值」入口：`current()` 与它的可查询
-/// 版本 `try_current()`。
-///
-/// `current()` 等价于 `Runtime::<{ FULL }>::current()`，但**不需要写类型参数**，
-/// 因此在表达式位置也不会遇到类型推断问题；`try_current()` 在**不在**上下文内时
-/// 给出 `Option::None` 而不是 panic（语义见各后端的同名函数）。
-#[cfg(any(
-    all(
-        feature = "default-backend-tokio",
-        not(feature = "default-backend-compio"),
-        not(feature = "default-backend-smol"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        feature = "backend-tokio",
-        not(feature = "backend-compio"),
-        not(feature = "backend-smol"),
-    ),
-))]
-pub use abs_art_tokio::{current, try_current};
-
-/// 当前**默认**后端的取用入口（compio 版）：`current()` 与不 panic 的
-/// `try_current()`。compio 的运行时**绑定创建它的线程**，因此 `try_current()` 在
-/// 别的线程上通常给出 `Option::None`——这不是缺陷，而是「线程本地运行时」的如实表达。
-#[cfg(any(
-    all(
-        feature = "default-backend-compio",
-        not(feature = "default-backend-tokio"),
-        not(feature = "default-backend-smol"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        not(feature = "backend-tokio"),
-        feature = "backend-compio",
-        not(feature = "backend-smol"),
-    ),
-))]
-pub use abs_art_compio::{current, try_current};
-
-/// 当前**默认**后端的取用入口（smol 版）：`current()` 与 `try_current()`——
-/// 后者在 smol 上**永远**是 `Option::Some`（值是零大小标记，没有先决条件）。
-#[cfg(any(
-    all(
-        feature = "default-backend-smol",
-        not(feature = "default-backend-tokio"),
-        not(feature = "default-backend-compio"),
-    ),
-    all(
-        not(any(
-            feature = "default-backend-tokio",
-            feature = "default-backend-compio",
-            feature = "default-backend-smol",
-        )),
-        not(feature = "backend-tokio"),
-        not(feature = "backend-compio"),
-        feature = "backend-smol",
-    ),
-))]
-pub use abs_art_smol::{current, try_current};
-
-/// 具名别名：tokio 后端的完整能力集。
-#[cfg(feature = "backend-tokio")]
-pub use abs_art_tokio::FULL as TokioFull;
-
-/// 具名别名：compio 后端的完整能力集（不含 `SPAWN_SEND`）。
-#[cfg(feature = "backend-compio")]
-pub use abs_art_compio::FULL as CompioFull;
-
-/// 具名别名：smol 后端的完整能力集。
-#[cfg(feature = "backend-smol")]
-pub use abs_art_smol::FULL as SmolFull;
 
 /// 具名别名：tokio 后端的本地作用域类型。
 #[cfg(feature = "backend-tokio")]
@@ -387,17 +243,25 @@ pub use abs_art_compio::JoinHandle as CompioJoinHandle;
 #[cfg(feature = "backend-smol")]
 pub use abs_art_smol::JoinHandle as SmolJoinHandle;
 
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 集成控制和检测，至少启用一个 backend
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
 #[cfg(not(any(
     feature = "backend-tokio",
     feature = "backend-compio",
     feature = "backend-smol",
 )))]
 compile_error!(
-    "abs_art-bridge：必须启用一个 backend feature（backend-tokio / backend-compio / backend-smol）"
+    "abs_art-bridge：至少启用一个 backend feature（backend-tokio / backend-compio / backend-smol）"
 );
 
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // 守卫一：启用了多个 backend 却没声明默认 → 裸名会按优先级**悄悄**选一个，很可能是
 // 错的那个（`cargo test --workspace` 的 feature 并集尤其容易踩到）。这里让它编译失败。
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
 #[cfg(all(
     not(any(
         feature = "default-backend-tokio",
@@ -416,7 +280,11 @@ compile_error!(
      否则裸名会按优先级悄悄选中一个，可能与你想要的运行时不一致。"
 );
 
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // 守卫二：声明了多个默认后端 → 裸名没有唯一解，编译失败。
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
 #[cfg(any(
     all(feature = "default-backend-tokio", feature = "default-backend-compio"),
     all(feature = "default-backend-tokio", feature = "default-backend-smol"),
@@ -481,7 +349,7 @@ mod tests_compio_ {
     //!
     //! 与 tokio 模块同样用**具名别名** `CompioRuntime`，因此不受 bridge 缺省后端影响。
 
-    use super::{BLOCK_ON, CompioRuntime as Runtime, RuntimeTag, SPAWN_LOCAL, TrLocalScope};
+    use super::{BLOCK_ON, Runtime, RuntimeTag, SPAWN_LOCAL, TrLocalScope};
 
     /// 目的：验证桥接 crate 在启用 `backend-compio` 时，`CompioRuntime` 与
     /// `CompioLocalScope` 解析正确，且本地投递可用。

@@ -28,6 +28,19 @@ where
 {
     type JoinHandle<T> = JoinHandle<T> where T: 'static;
 
+    const FULL_CAP: usize = crate::FULL;
+
+    #[inline]
+    fn current() -> Self where Self: Sized {
+        Runtime::current()
+    }
+
+    #[inline]
+    fn try_current() -> Option<Self> where Self: Sized {
+        Runtime::try_current()
+    }
+
+    #[inline]
     fn about(&self) -> abs_art::RuntimeTag {
         abs_art::RuntimeTag::Compio
     }

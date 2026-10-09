@@ -50,11 +50,21 @@ impl<T: 'static> TrJoinHandle<T> for FakeJoin_<T> {
 pub struct FakeRt_;
 
 impl TrAsyncRuntime for FakeRt_ {
-    type JoinHandle<T>
-        = FakeJoin_<T>
-    where
-        T: 'static;
+    type JoinHandle<T> = FakeJoin_<T> where T: 'static;
 
+    const FULL_CAP: usize = usize::MAX;
+
+    #[inline]
+    fn current() -> Self where Self: Sized {
+        FakeRt_
+    }
+
+    #[inline]
+    fn try_current() -> Option<Self> where Self: Sized {
+        Option::Some(Self::current())
+    }
+
+    #[inline]
     fn about(&self) -> RuntimeTag {
         RuntimeTag::Smol
     }

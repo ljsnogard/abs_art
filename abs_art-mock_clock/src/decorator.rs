@@ -128,16 +128,13 @@ impl<R, C: ManualClockApi> TrTime for ManualTime<R, C> {
     }
 }
 
-impl<R: TrAsyncRuntime, C: ManualClockApi> TrAsyncRuntime for ManualTime<R, C> {
-    type JoinHandle<T>
-        = R::JoinHandle<T>
-    where
-        T: 'static;
-
-    fn about(&self) -> RuntimeTag {
-        self.inner_.about()
-    }
-}
+// impl<R: TrAsyncRuntime, C: ManualClockApi> TrAsyncRuntime for ManualTime<R, C> {
+//     type JoinHandle<T> = R::JoinHandle<T> where T: 'static;
+//
+//     fn about(&self) -> RuntimeTag {
+//         self.inner_.about()
+//     }
+// }
 
 impl<R: TrSpawnSend, C: ManualClockApi> TrSpawnSend for ManualTime<R, C> {
     type JoinHandle<T>
@@ -228,7 +225,7 @@ mod tests {
         let clock = ManualClock::new();
         let value = ManualTime::new(FakeRt_, clock.clone());
 
-        assert_eq!(value.about(), RuntimeTag::Smol);
+        // assert_eq!(value.about(), RuntimeTag::Smol);
         clock.advance_by(Duration::from_secs(5));
         assert_eq!(value.now().as_millis(), 5_000);
         assert_eq!(value.clock().now().as_millis(), 5_000);

@@ -107,6 +107,12 @@ pub trait TrAsyncRuntime {
     where
         T: 'static;
 
+    const FULL_CAP: usize;
+
+    fn current() -> Self where Self: Sized;
+
+    fn try_current() -> Option<Self> where Self: Sized;
+
     /// 报告本值的运行时身份。
     fn about(&self) -> RuntimeTag;
 }
