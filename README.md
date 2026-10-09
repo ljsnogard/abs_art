@@ -45,6 +45,11 @@ where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有�
 >    在 `LocalSet` 内被直接禁止）；新方法**不使用任何运行时的阻塞原语**：tokio / smol 用
 >    「`run_until` 驱动队列 + 纯 park」，compio 自己 tick 执行器与 IO。三端接口与可观察
 >    语义一致，差异只剩「本线程的 IO 由谁推」，如实写在文档里。
+> 6. **运行时值不再需要作为参数一路传递**：任何一处业务代码都可以用各后端的
+>    `current()`（bridge 以裸名转发）**当场取用**——同一线程上多次取得拿到的是同一个
+>    运行时、同一条本地队列，因此「由谁取」不影响语义。`current()` 要求调用点**已在所选
+>    后端的运行时上下文内**，这正是「随时取用」的边界；上下文之外的构造出口是各后端的
+>    `with_handle`（tokio）/ `with_runtime`（compio），smol 的值是零大小、随处可构造。
 >    收敛过程与实测见 `dev-notes/`。
 
 你的 API 被"运行时类型"污染，业务逻辑里全是与业务无关的泛型噪音。
@@ -67,29 +72,31 @@ abs_art-bridge = { path = "abs_art-bridge", default-features = false }
 ```
 
 ```rust
-// 业务库 lib.rs —— 只约束能力，不关心后端，也不关心容器类型
-use abs_art_bridge::{TrBlockOn, TrDelay, TrLocalScope};
+// 业务库 lib.rs —— 不接收运行时参数，不关心后端，也不关心容器类型；要用时当场取一个
+use abs_art_bridge::{BLOCK_ON, DELAY, Runtime, SPAWN_LOCAL, TrBlockOn, TrDelay, TrLocalScope};
 
-/// 业务函数 A：只约束**三个后端共同**的能力（计时 + 阻塞等待）
-pub fn double_after_tick<R>(rt: &R, x: u32) -> u32
-where
-    R: TrBlockOn + TrDelay,
-{
-    rt.block_on(async move {
+/// 业务函数 A：只声明**三个后端共同**的能力（计时 + 阻塞等待）
+pub fn double_after_tick(x: u32) -> u32 {
+    // 当场取运行时值：类型参数把「我只要这两样能力」写在类型上
+    let rt = Runtime::<{ BLOCK_ON | DELAY }>::current();
+    rt.block_on(async {
         rt.delay(core::time::Duration::from_millis(1)).await;
         x * 2
     })
 }
 
-/// 业务函数 B：本地投递（`!Send` 任务）——需要一个**线程独占**的作用域值
-pub async fn local_rc_double<S>(scope: &S, x: u32) -> u32
-where
-    S: TrLocalScope,
-{
+/// 业务函数 B：本地投递（`!Send` 任务）——需要的作用域同样当场取得
+pub async fn local_rc_double(x: u32) -> u32 {
+    let rt = Runtime::<{ SPAWN_LOCAL }>::current();
+    let scope = rt.local_scope();  // 本线程那条队列的别名
     let rc = std::rc::Rc::new(x); // !Send：只有本地队列能承载
     scope.spawn_local(async move { *rc * 2 }).await.unwrap()
 }
 ```
+
+取用发生在**调用点所在线程**上，因此那里必须已在所选后端的运行时上下文内（tokio / compio
+的 `current()` 在上下文之外会 panic）。也正因为「同一线程上多次取得 = 同一个运行时、同一条
+本地队列」，**由谁取都一样**——调用方不必再把这个值作为参数传进来。
 
 本版定型的形状：**运行时是值**，**本地队列是本线程那条队列的别名**：
 
@@ -103,6 +110,9 @@ where
 
 作用域从运行时值交出：`rt.local_scope()`，**要求 `CAPS` 含 `SPAWN_LOCAL`**——
 想用本地投递，就得把这件事写在类型上；同一线程上多次取得拿到的是**同一条**队列。
+
+运行时值与作用域都**当场取用**即可（`Runtime::<{ .. }>::current()` / `current()`，再
+`rt.local_scope()`）：不需要调用方把它们一路作为参数传下来，「由谁取」不影响语义。
 
 **compio 不实现 `TrSpawnSend`**：它没有跨线程全局队列，`spawn` 投的是本线程运行时的
 队列，因此「三后端共用」的业务代码只能建立在共同子集上（上例的业务函数 A）。
@@ -121,11 +131,13 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 fn main() {
     let outer = tokio::runtime::Runtime::new().unwrap();
     let out = outer.block_on(async {
-        // 构造运行时**值**：全能力（也可写 Runtime::<{ .. }>::current() 只给子集）
-        let rt = abs_art_bridge::current();
-        let scope = rt.local_scope();          // 线程独占的本地作用域
-        let a = my_business_lib::double_after_tick(&rt, 21);
-        let b = my_business_lib::local_rc_double(&scope, 21).await;
+        // 集成方只需保证「调用点已处于所选后端的运行时上下文内」——
+        // 运行时值与作用域由业务代码自己按需取用，不再作为参数传递。
+        // 「同步阻塞等待」那条路（内部是 tokio 的 block_in_place）不能走在本地驱动栈内
+        let a = my_business_lib::double_after_tick(21);
+        // 本地投递那条路由调用方驱动本线程的队列：用作用域的 run_until 包住它
+        let scope = abs_art_bridge::current().local_scope();
+        let b = scope.run_until(my_business_lib::local_rc_double(21)).await;
         (a, b)
     });
     assert_eq!(out, (42, 42));
@@ -311,8 +323,8 @@ assert!(started.elapsed() < core::time::Duration::from_secs(1)); // 真实时间
 
 | 场景 | 写法 | 后端如何决定 |
 |---|---|---|
-| 业务库（不感知后端） | `use abs_art_bridge::...`，泛型于 `R: TrXxx` 或声明 `Runtime::<{能力}>` | 集成方在 Cargo.toml 选 feature |
-| 二进制（拥有运行时） | 构造运行时值（`abs_art_bridge::current()` 或 `Runtime::<{..}>::current()`）并传给业务库 | 自己创建运行时 |
+| 业务库（不感知后端） | `use abs_art_bridge::...`；需要时用 `Runtime::<{能力}>::current()` **当场取用**，不接收运行时参数 | 集成方在 Cargo.toml 选 feature |
+| 二进制（拥有运行时） | 只需保证调用点处于所选后端的运行时上下文内（业务代码自己 `current()` 取用） | 自己创建运行时 |
 
 ### 需要注意的两点
 
@@ -322,7 +334,7 @@ assert!(started.elapsed() < core::time::Duration::from_secs(1)); // 真实时间
 - **启用多个后端时必须显式声明默认后端**：`cargo test --workspace` 会把各成员的
   feature 取并集；若此后没有 `default-backend-*`，裸名 `Runtime` 会按优先级悄悄选中
   一个（很可能是错的那个，运行期才崩）。bridge 对这种情况直接 `compile_error!`。
-- **二进制的运行时构造代码与所选后端绑定**：bridge 负责抽象"能力"，不负责替你创建 tokio/compio 运行时实例——`main.rs` 里创建运行时的那几行本来就该属于"拥有运行时"的一方。
+- **二进制的运行时构造代码与所选后端绑定**：bridge 负责抽象"能力"，不负责替你创建 tokio/compio 运行时实例——`main.rs` 里创建运行时的那几行本来就该属于"拥有运行时"的一方。反过来，**业务代码不需要接收这个值**：它在自己的调用点上用 `current()` 当场取（前提是那里已在所选后端的上下文内）。
 - **compio 没有 `TrSpawnSend`**：它没有跨线程全局工作队列（`spawn` 投的是本线程运行时的队列），所以不实现该 trait。需要「三后端同一份代码」时，只约束共同子集，投递任务走本地作用域。
 
 ## 测试
