@@ -5,71 +5,7 @@
 //!
 //! # 后端选择（通过 Cargo.toml，而非代码）
 //!
-//! 集成方（通常是最终的二进制）在 Cargo.toml 里启用 `backend-*` feature：
-//!
-//! ```toml
-//! [dependencies]
-//! abs_art-bridge = { path = "abs_art-bridge", features = ["backend-tokio"] }
-//! ```
-//!
-//! 切换后端 = 改这一行 feature，业务代码零改动。
-//!
-//! # 多个后端可以同时启用
-//!
-//! 裸名 [`Runtime`] 按 **cfg 优先级**解析（`backend-tokio` > `backend-compio` >
-//! `backend-smol`）；同时启用多个后端时，非默认的那些用**具名别名**
-//! `TokioRuntime` / `CompioRuntime` / `SmolRuntime` 取用（按 feature 出现）。
-//! 一个都没启用时 `compile_error!`（fail fast）。**缺省是 compio**
-//! （`default = ["default-backend-compio"]`，即「显式声明默认」，这样多后端并集时
-//! 裸名仍有唯一解）。
-//!
-//! # 业务代码用法
-//!
-//! 本版起运行时是**值**：先构造它，再在它上面调能力方法。
-//!
-//! ```no_run
-//! use core::time::Duration;
-//!
-//! use abs_art_bridge::{BLOCK_ON, DELAY, Runtime, TrBlockOn, TrDelay};
-//!
-//! # fn drive<T>(_: impl FnOnce() -> T) -> T { unimplemented!() }
-//! # let out: u32 = drive(|| {
-//! // 构造运行时**值**（需要已处于后端运行时上下文内）
-//! let rt = Runtime::<{ BLOCK_ON | DELAY }>::current();
-//! // 声明的能力决定哪些方法可调；未声明（或后端不支持）的能力在编译期报错
-//! rt.block_on(async {
-//!     rt.delay(Duration::from_millis(1)).await;
-//!     2u32
-//! })
-//! # });
-//! ```
-//!
-//! 上面刻意只用**跨后端共同**的能力：全局 `spawn`（[`TrSpawnSend`]）只有具备
-//! 跨线程工作队列的后端才提供（tokio / smol），**compio 不实现它**——compio 上
-//! 投递任务请走下面那条本地作用域路径。跨后端共用的代码因此只应约束共同子集：
-//! [`TrBlockOn`] + [`TrDelay`] / [`TrTime`] / [`TrClock`] + [`TrSpawnBlocking`] +
-//! [`TrLocalScope`]。
-//!
-//! 本地投递（`!Send` 任务）需要一个**本线程队列的别名**，由运行时值交出。需要
-//! 「同步等到 future 完成、同时不饿死本地队列」时，用作用域自己的
-//! [`TrLocalScope::block_on_local`]：
-//!
-//! ```no_run
-//! use abs_art_bridge::{FULL, Runtime, TrLocalScope};
-//!
-//! let rt = Runtime::<{ FULL }>::current();
-//! let scope = rt.local_scope();           // 要求 CAPS 含 SPAWN_LOCAL
-//! let out = scope.block_on_local(async {
-//!     let rc = std::rc::Rc::new(1u32);    // !Send：只有本地队列能承载
-//!     scope.spawn_local(async move { *rc }).await.unwrap()
-//! });
-//! # let _ = out;
-//! ```
-//!
-//! 它**不使用**运行时的阻塞原语（tokio 的 `block_in_place` 在 `LocalSet` 内被禁止），
-//! 而是自己驱动本线程队列；与 [`TrBlockOn::block_on`] 的分工、以及各后端的边界见该
-//! 方法的文档。外层已经有正在跑的驱动源时，也可以照旧写
-//! `rt.block_on(scope.run_until(f))` 或直接 `scope.run_until(f).await`。
+//! 集成方请链接 `abs_art-facade`，不要直接链接此 crate
 
 #![no_std]
 
