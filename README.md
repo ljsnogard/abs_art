@@ -20,38 +20,6 @@ pub async fn process<R>(...) -> ...          // 每个函数都要带一个 R �
 where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有代码
 ```
 
-> **本版（0.3.0，开发中）的几次收敛。** 能力 trait 不再带 `F` 类型参数：被 spawn 的
-> future 类型是各自动**方法级泛型参数**，于是一个 `R: TrSpawnSend` 约束就能覆盖该运行时上
-> **所有**任务类型（包括调用点无法命名的 `async {}` 块）。**本地投递**则经过四轮收敛，
-> 最终定型为「声明位 + 线程本地队列的别名」：
->
-> 1. 最初是类型级 `TrSpawnLocal<F>`；
-> 2. 后来拆成「能力位 `SPAWN_LOCAL`（只负责声明）+ `TrLocalScope` 值」，但那个作用域
->    可以脱离运行时凭空造出来；
-> 3. 中途一度把本地队列并进**运行时值**（`rt.spawn_local(..)`），想让「哪个运行时」
->    由手上的值回答；代价是 tokio 的运行时值被迫 `!Send`——`Rc<LocalSet>` 拖累了本来
->    `Send + Sync` 的 `Handle`，而「可共享的把手」与「线程独占的队列」两种生命周期
->    被绑死；
-> 4. **最终定型**：`Runtime` 是**值**（`&self` 能力方法：全局投递 / 阻塞等待 / 计时与
->    时刻）；`LocalScope` 是**本线程那条队列的别名**——tokio / smol 把队列放进
->    `thread_local!`，compio 的队列本就在线程本地的运行时实例里（它是本次对齐的基准）。
->    三条可依赖的性质：`Clone` 只增加别名、同一线程上多次 `local_scope()` 拿到**同一条**
->    队列、类型是 `!Send`；「同一线程多条 `LocalSet`」被显式排除；
->    新增 `TrClock`（`TrTime: TrDelay + TrClock`）让「时刻与计时器同源」成为类型约束；
->    **compio 不实现 `TrSpawnSend`**——它没有跨线程全局队列，假装有会让约束失真。
-> 5. **作用域的阻塞入口回来了，但换了机制**：`TrLocalScope::block_on_local` 提供
->    「阻塞当前线程直到 future 完成，等待期间持续驱动本线程队列」。它不是当初那条被删的
->    `scope.block_on`（那条把「怎么阻塞」整个交给后端，tokio 上只能用 `block_in_place`，
->    在 `LocalSet` 内被直接禁止）；新方法**不使用任何运行时的阻塞原语**：tokio / smol 用
->    「`run_until` 驱动队列 + 纯 park」，compio 自己 tick 执行器与 IO。三端接口与可观察
->    语义一致，差异只剩「本线程的 IO 由谁推」，如实写在文档里。
-> 6. **运行时值不再需要作为参数一路传递**：任何一处业务代码都可以用各后端的
->    `current()`（bridge 以裸名转发）**当场取用**——同一线程上多次取得拿到的是同一个
->    运行时、同一条本地队列，因此「由谁取」不影响语义。`current()` 要求调用点**已在所选
->    后端的运行时上下文内**，这正是「随时取用」的边界；上下文之外的构造出口是各后端的
->    `with_handle`（tokio）/ `with_runtime`（compio），smol 的值是零大小、随处可构造。
->    收敛过程与实测见 `dev-notes/`。
-
 你的 API 被"运行时类型"污染，业务逻辑里全是与业务无关的泛型噪音。
 
 **abs_art 的思路：把"选哪个运行时"从"写代码的时候"推迟到"集成的时候"。**
@@ -68,12 +36,12 @@ where R: TrSpawnSend + TrDelay + ...         // 泛型参数一路穿透所有�
 ```toml
 # 业务库的 Cargo.toml：只依赖 bridge，不选后端（default-features = false）
 [dependencies]
-abs_art-bridge = { path = "abs_art-bridge", default-features = false }
+abs_art-facade = { git = "https://github.com/ljsnogard/abs_art.git", default-features = false }
 ```
 
 ```rust
 // 业务库 lib.rs —— 不接收运行时参数，不关心后端，也不关心容器类型；要用时当场取一个
-use abs_art_bridge::{BLOCK_ON, DELAY, Runtime, SPAWN_LOCAL, TrBlockOn, TrDelay, TrLocalScope};
+use abs_art_facade::{BLOCK_ON, DELAY, Runtime, SPAWN_LOCAL, TrBlockOn, TrDelay, TrLocalScope};
 
 /// 业务函数 A：只声明**三个后端共同**的能力（计时 + 阻塞等待）
 pub fn double_after_tick(x: u32) -> u32 {
